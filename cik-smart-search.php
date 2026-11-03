@@ -187,7 +187,13 @@ class Cik_Smart_Search {
         wp_localize_script('cik-search-voice', 'cikSearchVoice', array(
             'autoSubmit'       => (bool) get_option('cik_search_voice_auto_submit', 0),
             'listeningBgColor' => get_option('cik_search_voice_listening_color', '#22c55e'),
-            'language'         => get_option('cik_search_voice_language', 'el-GR'),
+            'language'         => $this->get_voice_language(),
+            'i18n'             => array(
+                'permissionDenied'    => __('Please allow microphone access.', 'cik-smart-search'),
+                'permissionDeniedIOS' => __('Please allow microphone access: Settings > Safari > Microphone.', 'cik-smart-search'),
+                'network'             => __('Network error. Please check your connection.', 'cik-smart-search'),
+                'noMicrophone'        => __('Microphone is not available.', 'cik-smart-search'),
+            ),
         ));
 
         wp_localize_script('cik-search-placeholder', 'cikSearchPlaceholders', $this->get_placeholders());
@@ -423,14 +429,17 @@ class Cik_Smart_Search {
 
         return array_values(array_intersect($slugs, $allowed));
     }
-
     /**
      * Languages offered for voice recognition (BCP 47 tag => label).
+     *
+     * "auto" follows the site/visitor locale (e.g. el_GR -> el-GR), so
+     * multilingual sites get the right recognition language per page.
      *
      * @return array
      */
     private function get_voice_languages() {
         return array(
+            'auto'  => __('Site language (automatic)', 'cik-smart-search'),
             'el-GR' => 'Ελληνικά (Greek)',
             'en-US' => 'English (US)',
             'en-GB' => 'English (UK)',
@@ -439,6 +448,20 @@ class Cik_Smart_Search {
             'es-ES' => 'Español (Spanish)',
             'it-IT' => 'Italiano (Italian)',
         );
+    }
+
+    /**
+     * Speech recognition language for the current request.
+     *
+     * @return string BCP 47 language tag.
+     */
+    private function get_voice_language() {
+        $language = get_option('cik_search_voice_language', 'auto');
+        if ($language === 'auto' || !array_key_exists($language, $this->get_voice_languages())) {
+            $language = str_replace('_', '-', determine_locale());
+        }
+
+        return $language;
     }
 
     /**
@@ -506,10 +529,10 @@ class Cik_Smart_Search {
 
         // Voice search.
         $voice_color    = sanitize_hex_color($this->posted_text('cik_search_voice_listening_color', '#22c55e'));
-        $voice_language = $this->posted_text('cik_search_voice_language', 'el-GR');
+        $voice_language = $this->posted_text('cik_search_voice_language', 'auto');
         update_option('cik_search_voice_auto_submit', $this->posted_flag('cik_search_voice_auto_submit'));
         update_option('cik_search_voice_listening_color', $voice_color ? $voice_color : '#22c55e');
-        update_option('cik_search_voice_language', array_key_exists($voice_language, $this->get_voice_languages()) ? $voice_language : 'el-GR');
+        update_option('cik_search_voice_language', array_key_exists($voice_language, $this->get_voice_languages()) ? $voice_language : 'auto');
 
         // Analytics.
         update_option('cik_search_enable_analytics', $this->posted_flag('cik_search_enable_analytics'));
@@ -573,7 +596,7 @@ class Cik_Smart_Search {
         $cache_duration = get_option('cik_search_predictive_cache_duration', 5);
         $voice_auto_submit = get_option('cik_search_voice_auto_submit', 0);
         $voice_listening_color = get_option('cik_search_voice_listening_color', '#22c55e');
-        $voice_language = get_option('cik_search_voice_language', 'el-GR');
+        $voice_language = get_option('cik_search_voice_language', 'auto');
         $enable_analytics = get_option('cik_search_enable_analytics', 1);
         $log_ip = get_option('cik_search_log_ip', 0);
         $analytics_retention = get_option('cik_search_analytics_retention', 90);
@@ -677,7 +700,7 @@ class Cik_Smart_Search {
                                     <?php endif; ?>
                                 </div>
                                 <button type="button" id="add-keyword" class="button" style="margin-top: 8px;"><?php esc_html_e('+ Add Keyword', 'cik-smart-search'); ?></button>
-                                <p class="description"><?php esc_html_e('Add suggested search keywords that will appear when user clicks on search (before typing). Examples: "shoes", "summer offers", "gift cards"', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Suggested keywords shown in place of the tags while the visitor types (matching is accent-insensitive). Examples: "shoes", "summer offers", "gift cards".', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
@@ -1047,13 +1070,9 @@ class Cik_Smart_Search {
                             </th>
                             <td>
                                 <select id="cik_search_voice_language" name="cik_search_voice_language">
-                                    <option value="el-GR" <?php selected($voice_language, 'el-GR'); ?>>Ελληνικά (Greek)</option>
-                                    <option value="en-US" <?php selected($voice_language, 'en-US'); ?>>English (US)</option>
-                                    <option value="en-GB" <?php selected($voice_language, 'en-GB'); ?>>English (UK)</option>
-                                    <option value="de-DE" <?php selected($voice_language, 'de-DE'); ?>>Deutsch (German)</option>
-                                    <option value="fr-FR" <?php selected($voice_language, 'fr-FR'); ?>>Français (French)</option>
-                                    <option value="es-ES" <?php selected($voice_language, 'es-ES'); ?>>Español (Spanish)</option>
-                                    <option value="it-IT" <?php selected($voice_language, 'it-IT'); ?>>Italiano (Italian)</option>
+                                    <?php foreach ($this->get_voice_languages() as $code => $label) : ?>
+                                        <option value="<?php echo esc_attr($code); ?>" <?php selected($voice_language, $code); ?>><?php echo esc_html($label); ?></option>
+                                    <?php endforeach; ?>
                                 </select>
                                 <p class="description"><?php esc_html_e('Language for voice recognition', 'cik-smart-search'); ?></p>
                             </td>
