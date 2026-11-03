@@ -1314,10 +1314,10 @@ class Cik_Smart_Search {
                 $post_type = get_post_type();
                 
                 $result = array(
-                    'title'     => get_the_title(),
-                    'url'       => get_permalink(),
+                    'title'     => $this->to_plain_text(get_the_title()),
+                    'url'       => esc_url_raw(get_permalink()),
                     'post_type' => $post_type,
-                    'type'      => get_post_type_object($post_type)->labels->singular_name,
+                    'type'      => $this->get_post_type_label($post_type),
                     'date'      => get_the_date(),
                 );
                 
@@ -1325,7 +1325,7 @@ class Cik_Smart_Search {
                 if ($show_images) {
                     $thumb_id = get_post_thumbnail_id($post_id);
                     if ($thumb_id) {
-                        $result['image'] = wp_get_attachment_image_url($thumb_id, 'thumbnail');
+                        $result['image'] = esc_url_raw(wp_get_attachment_image_url($thumb_id, 'thumbnail'));
                     }
                 }
                 
@@ -1333,8 +1333,7 @@ class Cik_Smart_Search {
                 if ($show_excerpt) {
                     $excerpt = has_excerpt() ? get_the_excerpt() : wp_trim_words(get_the_content(), 20, '...');
                     if (!empty($excerpt)) {
-                        $result['excerpt'] = wp_strip_all_tags($excerpt);
-                        $result['excerpt'] = wp_trim_words($result['excerpt'], 15, '...');
+                        $result['excerpt'] = wp_trim_words($this->to_plain_text($excerpt), 15, '...');
                     }
                 }
                 
@@ -1357,7 +1356,7 @@ class Cik_Smart_Search {
                 
                 // Add matched content if enabled
                 if ($show_matched_content) {
-                    $matched = $this->get_matched_content($full_content, get_the_title(), $query, $show_match_location);
+                    $matched = $this->get_matched_content($full_content, $this->to_plain_text(get_the_title()), $query, $show_match_location);
                     $result['matched_content'] = $matched;
                 }
                 
@@ -1623,26 +1622,30 @@ class Cik_Smart_Search {
         if (!empty($terms) && !is_wp_error($terms)) {
             foreach ($terms as $term) {
                 $taxonomy_obj = get_taxonomy($term->taxonomy);
-                
+                $term_link    = get_term_link($term);
+                if (is_wp_error($term_link)) {
+                    continue;
+                }
+
                 $result = array(
-                    'title'         => $term->name,
-                    'url'           => get_term_link($term),
+                    'title'         => $this->to_plain_text($term->name),
+                    'url'           => esc_url_raw($term_link),
                     'taxonomy_slug' => $term->taxonomy,
                     'post_type'     => $term->taxonomy,
-                    'type'          => $taxonomy_obj->labels->singular_name,
+                    'type'          => $taxonomy_obj ? $this->to_plain_text($taxonomy_obj->labels->singular_name) : '',
                     'taxonomy'      => true,
-                    'count'         => $term->count,
+                    'count'         => (int) $term->count,
                 );
                 
                 // Add description as excerpt if available
                 if (!empty($term->description)) {
-                    $result['excerpt'] = wp_trim_words(wp_strip_all_tags($term->description), 15, '...');
+                    $result['excerpt'] = wp_trim_words($this->to_plain_text($term->description), 15, '...');
                 }
                 
                 // Highlight matched content in term name
                 $show_matched_content = get_option('cik_search_predictive_show_matched_content', 1);
                 if ($show_matched_content) {
-                    $matched = $this->highlight_text($term->name, array($query));
+                    $matched = $this->highlight_text($this->to_plain_text($term->name), array($query));
                     $result['matched_content'] = $matched;
                 }
                 
@@ -1665,8 +1668,8 @@ class Cik_Smart_Search {
      */
     private function get_matched_content($content, $title, $query, $show_location = true) {
         // Remove HTML tags
-        $content = wp_strip_all_tags($content);
-        $title_text = wp_strip_all_tags($title);
+        $content    = $this->to_plain_text($content);
+        $title_text = $this->to_plain_text($title);
         
         // Prepare search terms
         $search_terms = array_filter(explode(' ', $query));
@@ -1690,9 +1693,9 @@ class Cik_Smart_Search {
         // If no search terms, return title
         if (empty($search_terms)) {
             if ($show_location) {
-                return '<strong>' . __('Result:', 'cik-smart-search') . '</strong> ' . $title_text;
+                return '<strong>' . esc_html__('Result:', 'cik-smart-search') . '</strong> ' . esc_html($title_text);
             }
-            return $title_text;
+            return esc_html($title_text);
         }
         
         $best_match = '';
@@ -1730,7 +1733,7 @@ class Cik_Smart_Search {
         if ($found_in_title) {
             $highlighted = $this->highlight_text($title_text, $search_terms);
             if ($show_location) {
-                return '<strong>' . __('Found in the title:', 'cik-smart-search') . '</strong> ' . $highlighted;
+                return '<strong>' . esc_html__('Found in the title:', 'cik-smart-search') . '</strong> ' . $highlighted;
             } else {
                 return $highlighted;
             }
@@ -1777,7 +1780,7 @@ class Cik_Smart_Search {
         if ($content_has_match && !empty($best_match)) {
             $highlighted = $this->highlight_text($best_match, $search_terms);
             if ($show_location) {
-                return '<strong>' . __('Found in the content:', 'cik-smart-search') . '</strong> ' . $highlighted;
+                return '<strong>' . esc_html__('Found in the content:', 'cik-smart-search') . '</strong> ' . $highlighted;
             } else {
                 return $highlighted;
             }
@@ -1787,7 +1790,7 @@ class Cik_Smart_Search {
         if (!empty($title_text)) {
             $highlighted = $this->highlight_text($title_text, $search_terms);
             if ($show_location) {
-                return '<strong>' . __('Result:', 'cik-smart-search') . '</strong> ' . $highlighted;
+                return '<strong>' . esc_html__('Result:', 'cik-smart-search') . '</strong> ' . $highlighted;
             } else {
                 return $highlighted;
             }
@@ -2061,59 +2064,93 @@ class Cik_Smart_Search {
     }
     
     /**
-     * Highlight search terms in text (accent-insensitive for Greek text)
+     * Highlight search terms in plain text (accent-insensitive for Greek).
+     *
+     * The input is treated as plain text: every segment is escaped with
+     * esc_html() and only <mark> tags are added, so the returned string is
+     * safe to insert as HTML on the front end.
+     *
+     * @param string $text  Plain text (no HTML).
+     * @param array  $terms Search terms.
+     * @return string Escaped HTML.
      */
     private function highlight_text($text, $terms) {
-        // Check if text contains Greek characters
         $has_greek = preg_match('/[\x{0370}-\x{03FF}\x{1F00}-\x{1FFF}]/u', $text);
-        
+
+        $haystack = mb_strtolower($text, 'UTF-8');
+        if ($has_greek) {
+            $haystack = $this->remove_greek_accents($haystack);
+        }
+
+        // Collect [start, end) character ranges of every match.
+        $ranges = array();
         foreach ($terms as $term) {
-            if (mb_strlen($term) < 2) continue;
-            
-            // For Greek text, use accent-insensitive matching
-            // For other languages, use simple case-insensitive matching
+            if (mb_strlen($term, 'UTF-8') < 2) {
+                continue;
+            }
+
+            $needle = mb_strtolower($term, 'UTF-8');
             if ($has_greek) {
-                // Create accent-free versions for matching
-                $term_no_accents = $this->remove_greek_accents(mb_strtolower($term, 'UTF-8'));
-                $text_no_accents = $this->remove_greek_accents(mb_strtolower($text, 'UTF-8'));
-            } else {
-                // Simple case-insensitive for non-Greek text
-                $term_no_accents = mb_strtolower($term, 'UTF-8');
-                $text_no_accents = mb_strtolower($text, 'UTF-8');
+                $needle = $this->remove_greek_accents($needle);
             }
-            
-            // Find all matches
+
+            $length = mb_strlen($needle, 'UTF-8');
             $offset = 0;
-            $text_length = mb_strlen($text, 'UTF-8');
-            $marked_text = '';
-            $last_pos = 0;
-            
-            $term_length = mb_strlen($term_no_accents, 'UTF-8');
-            
-            while (($pos = mb_strpos($text_no_accents, $term_no_accents, $offset, 'UTF-8')) !== false) {
-                // Add text before match
-                $marked_text .= mb_substr($text, $last_pos, $pos - $last_pos, 'UTF-8');
-                
-                // Add highlighted match (keep original with accents)
-                $original_match = mb_substr($text, $pos, $term_length, 'UTF-8');
-                $marked_text .= '<mark>' . $original_match . '</mark>';
-                
-                $last_pos = $pos + $term_length;
-                $offset = $pos + $term_length;
-            }
-            
-            // Add remaining text
-            if ($last_pos < $text_length) {
-                $marked_text .= mb_substr($text, $last_pos, null, 'UTF-8');
-            }
-            
-            // If we found matches, update text
-            if ($last_pos > 0) {
-                $text = $marked_text;
+            while (($pos = mb_strpos($haystack, $needle, $offset, 'UTF-8')) !== false) {
+                $ranges[] = array($pos, $pos + $length);
+                $offset   = $pos + $length;
             }
         }
-        
-        return $text;
+
+        if (empty($ranges)) {
+            return esc_html($text);
+        }
+
+        usort($ranges, function ($a, $b) {
+            return $a[0] - $b[0];
+        });
+
+        // Build the output from escaped segments, keeping the original characters (with accents).
+        $output = '';
+        $cursor = 0;
+        foreach ($ranges as $range) {
+            $start = max($range[0], $cursor);
+            $end   = $range[1];
+            if ($end <= $cursor) {
+                continue; // Already covered by a previous (overlapping) match.
+            }
+
+            $output .= esc_html(mb_substr($text, $cursor, $start - $cursor, 'UTF-8'));
+            $output .= '<mark>' . esc_html(mb_substr($text, $start, $end - $start, 'UTF-8')) . '</mark>';
+            $cursor  = $end;
+        }
+        $output .= esc_html(mb_substr($text, $cursor, null, 'UTF-8'));
+
+        return $output;
+    }
+
+    /**
+     * Convert stored HTML/entity-encoded text (titles, content, term names) to plain text.
+     *
+     * @param string $text Raw text that may contain tags, shortcodes or HTML entities.
+     * @return string Plain text.
+     */
+    private function to_plain_text($text) {
+        $text = wp_strip_all_tags(strip_shortcodes((string) $text));
+
+        return html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+    }
+
+    /**
+     * Singular label of a post type as plain text.
+     *
+     * @param string $post_type Post type slug.
+     * @return string
+     */
+    private function get_post_type_label($post_type) {
+        $object = get_post_type_object($post_type);
+
+        return $object ? $this->to_plain_text($object->labels->singular_name) : '';
     }
     
     /**
@@ -2425,13 +2462,13 @@ class Cik_Smart_Search {
             case 'count':
                 $count = get_post_meta($post_id, '_search_count', true);
                 $count = $count ? intval($count) : 1; // Default to 1 if not set (old entries)
-                echo '<strong style="color:#0066b3;font-size:16px;">' . esc_html($count) . '</strong> ' . _n('time', 'times', $count, 'cik-smart-search');
+                echo '<strong style="color:#0066b3;font-size:16px;">' . esc_html($count) . '</strong> ' . esc_html(_n('time', 'times', $count, 'cik-smart-search'));
                 break;
                 
             case 'results':
                 $count = get_post_meta($post_id, '_results_count', true);
                 if ($count !== '') {
-                    echo '<strong>' . esc_html($count) . '</strong> ' . _n('result', 'results', $count, 'cik-smart-search');
+                    echo '<strong>' . esc_html((int) $count) . '</strong> ' . esc_html(_n('result', 'results', (int) $count, 'cik-smart-search'));
                 } else {
                     echo '<span style="color:#999;">—</span>';
                 }
@@ -2450,9 +2487,9 @@ class Cik_Smart_Search {
                 $referer = get_post_meta($post_id, '_referer', true);
                 if ($referer) {
                     $path = wp_parse_url($referer, PHP_URL_PATH);
-                    echo '<a href="' . esc_url($referer) . '" target="_blank" title="' . esc_attr($referer) . '">' . esc_html($path ?: '/') . '</a>';
+                    echo '<a href="' . esc_url($referer) . '" target="_blank" rel="noopener noreferrer" title="' . esc_attr($referer) . '">' . esc_html($path ?: '/') . '</a>';
                 } else {
-                    echo '<span style="color:#999;">Direct</span>';
+                    echo '<span style="color:#999;">' . esc_html__('Direct', 'cik-smart-search') . '</span>';
                 }
                 break;
         }

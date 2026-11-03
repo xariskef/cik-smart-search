@@ -30,7 +30,7 @@ if (!defined('ABSPATH')) {
                     id="cik-search-field"
                     type="search"
                     name="s"
-                    value="<?php echo get_search_query() ?? ''; ?>"
+                    value="<?php echo esc_attr(get_search_query(false)); ?>"
                     placeholder="<?php echo esc_attr($search_placeholder); ?>"
                     autocomplete="off"
                     class="cik-search-input" />
