@@ -114,10 +114,15 @@ class Cik_Smart_Search {
     }
     
     /**
-     * Enqueue plugin assets
+     * Register front-end assets.
+     *
+     * The (small) stylesheets are enqueued on every front-end page so the box
+     * renders without a flash of unstyled content when a theme prints the
+     * shortcode from a template. The scripts and their data (which needs a
+     * database query for popular searches) are only enqueued by
+     * render_search_box(), i.e. on pages that actually contain a search box.
      */
     public function enqueue_assets() {
-        // Enqueue CSS
         wp_enqueue_style(
             'cik-smart-search',
             CIK_SEARCH_URL . 'assets/css/search-box.css',
@@ -125,9 +130,7 @@ class Cik_Smart_Search {
             CIK_SEARCH_VERSION
         );
 
-        // Component styles (Tailwind-free). Provides all layout/visual rules
-        // for the template and the JS-injected predictive markup, so the
-        // plugin no longer depends on the theme's Tailwind build.
+        // Component styles for the template and the JS-rendered results.
         wp_enqueue_style(
             'cik-search-theme-utilities',
             CIK_SEARCH_URL . 'assets/css/theme-utilities.css',
@@ -135,62 +138,6 @@ class Cik_Smart_Search {
             CIK_SEARCH_VERSION
         );
 
-        // Voice Search JS - Web Speech API (Chrome, Edge, Safari)
-        wp_enqueue_script(
-            'cik-search-voice',
-            CIK_SEARCH_URL . 'assets/js/voice-search.js',
-            array(),
-            CIK_SEARCH_VERSION,
-            true
-        );
-        
-        // Pass voice search settings to JavaScript
-        $voice_settings = array(
-            'autoSubmit' => (bool) get_option('cik_search_voice_auto_submit', 0),
-            'listeningBgColor' => get_option('cik_search_voice_listening_color', '#22c55e'),
-            'language' => get_option('cik_search_voice_language', 'el-GR'),
-        );
-        
-        wp_localize_script(
-            'cik-search-voice',
-            'cikSearchVoice',
-            $voice_settings
-        );
-        
-        // Placeholder Animation
-        wp_enqueue_script(
-            'cik-search-placeholder',
-            CIK_SEARCH_URL . 'assets/js/placeholder-animation.js',
-            array(),
-            CIK_SEARCH_VERSION,
-            true
-        );
-        
-        // Get placeholder texts — pick EN if current language is English
-        $current_lang = apply_filters('wpml_current_language', null);
-        if ($current_lang === 'en') {
-            $placeholders = get_option('cik_search_placeholders_en', array());
-            if (empty($placeholders)) {
-                $single = get_option('cik_search_placeholder_en', '');
-                if (empty($single)) $single = get_option('cik_search_placeholder', 'Search...');
-                $placeholders = array($single);
-            }
-        } else {
-            $placeholders = get_option('cik_search_placeholders', array());
-            if (empty($placeholders)) {
-                $single = get_option('cik_search_placeholder', 'Search...');
-                $placeholders = array($single);
-            }
-        }
-        
-        wp_localize_script(
-            'cik-search-placeholder',
-            'cikSearchPlaceholders',
-            $placeholders
-        );
-        
-        // Predictive Search & Suggested Keywords
-        // Always load JS/CSS for suggested keywords, even if predictive search is disabled
         wp_enqueue_style(
             'cik-search-predictive',
             CIK_SEARCH_URL . 'assets/css/predictive-search.css',
@@ -198,121 +145,154 @@ class Cik_Smart_Search {
             CIK_SEARCH_VERSION
         );
 
-         wp_enqueue_script(
+        wp_register_script(
+            'cik-search-voice',
+            CIK_SEARCH_URL . 'assets/js/voice-search.js',
+            array(),
+            CIK_SEARCH_VERSION,
+            true
+        );
+
+        wp_register_script(
+            'cik-search-placeholder',
+            CIK_SEARCH_URL . 'assets/js/placeholder-animation.js',
+            array(),
+            CIK_SEARCH_VERSION,
+            true
+        );
+
+        wp_register_script(
             'cik-search-predictive',
             CIK_SEARCH_URL . 'assets/js/predictive-search.js',
             array(),
             CIK_SEARCH_VERSION,
             true
         );
-        
-        wp_enqueue_script(
-            'cik-search-predictive',
-            CIK_SEARCH_URL . 'assets/js/predictive-search.js',
-            array(),
-            CIK_SEARCH_VERSION,
-            true
-        );
-        
-        // Prepare keywords and popular searches for frontend
+    }
+
+    /**
+     * Enqueue the scripts and pass their settings (runs once per page, from the shortcode).
+     */
+    private function enqueue_scripts() {
+        static $done = false;
+        if ($done) {
+            return;
+        }
+        $done = true;
+
+        wp_enqueue_script('cik-search-voice');
+        wp_enqueue_script('cik-search-placeholder');
+        wp_enqueue_script('cik-search-predictive');
+
+        wp_localize_script('cik-search-voice', 'cikSearchVoice', array(
+            'autoSubmit'       => (bool) get_option('cik_search_voice_auto_submit', 0),
+            'listeningBgColor' => get_option('cik_search_voice_listening_color', '#22c55e'),
+            'language'         => get_option('cik_search_voice_language', 'el-GR'),
+        ));
+
+        wp_localize_script('cik-search-placeholder', 'cikSearchPlaceholders', $this->get_placeholders());
+        wp_localize_script('cik-search-predictive', 'cikSearchPredictive', $this->get_predictive_settings());
+    }
+
+    /**
+     * Animated placeholder texts for the current language.
+     *
+     * @return array
+     */
+    private function get_placeholders() {
+        $suffix = (apply_filters('wpml_current_language', null) === 'en') ? '_en' : '';
+
+        $placeholders = array_values(array_filter((array) get_option('cik_search_placeholders' . $suffix, array())));
+        if (empty($placeholders)) {
+            $single = $suffix ? get_option('cik_search_placeholder_en', '') : '';
+            if (empty($single)) {
+                $single = get_option('cik_search_placeholder', 'Search...');
+            }
+            $placeholders = array($single);
+        }
+
+        return $placeholders;
+    }
+
+    /**
+     * Settings and preloaded keywords for predictive-search.js.
+     *
+     * @return array
+     */
+    private function get_predictive_settings() {
         $keywords_data = array(
-            'manual' => array(),
-            'popular' => array()
+            'manual'  => array(),
+            'popular' => array(),
         );
-        
-        // Get keywords source setting
+
         $keywords_source = get_option('cik_search_keywords_source', 'mixed');
-        $total_limit = intval(get_option('cik_search_suggested_keywords_limit', 30));
-        
-        // Get popular searches first (they have count data for ordering)
-        $show_popular = get_option('cik_search_show_popular_searches', 1);
-        $enable_analytics = get_option('cik_search_enable_analytics', 1);
-        $popular_texts = array(); // track for deduplication
-        
-        if ($show_popular && $enable_analytics) {
-            $pop_limit = get_option('cik_search_popular_searches_limit', 5);
-            $popular_searches = $this->get_popular_searches($pop_limit);
-            
+        $total_limit     = (int) get_option('cik_search_suggested_keywords_limit', 30);
+        $popular_texts   = array(); // For de-duplication against manual keywords.
+
+        // Popular searches first (they carry counts for ordering).
+        if (get_option('cik_search_show_popular_searches', 1) && get_option('cik_search_enable_analytics', 1)) {
+            $popular_searches = $this->get_popular_searches((int) get_option('cik_search_popular_searches_limit', 5));
+
             foreach ($popular_searches as $search) {
                 $keywords_data['popular'][] = array(
-                    'text' => $search['query'],
-                    'count' => $search['count'],
-                    'results' => isset($search['results']) ? $search['results'] : 0,
-                    'type' => 'popular'
+                    'text'    => $search['query'],
+                    'count'   => (int) $search['count'],
+                    'results' => isset($search['results']) ? (int) $search['results'] : 0,
+                    'type'    => 'popular',
                 );
                 $popular_texts[] = mb_strtolower($search['query'], 'UTF-8');
             }
         }
-        
-        // Get manual keywords (exclude duplicates already in popular)
+
+        // Manual keywords, skipping the ones already listed as popular.
         if ($keywords_source !== 'popular_only') {
-            $manual_keywords = get_option('cik_search_suggested_keywords', array());
-            if (!empty($manual_keywords)) {
-                foreach ($manual_keywords as $keyword) {
-                    if (!in_array(mb_strtolower($keyword, 'UTF-8'), $popular_texts)) {
-                        $keywords_data['manual'][] = array(
-                            'text' => $keyword,
-                            'type' => 'manual'
-                        );
-                    }
+            foreach ((array) get_option('cik_search_suggested_keywords', array()) as $keyword) {
+                if (!in_array(mb_strtolower($keyword, 'UTF-8'), $popular_texts, true)) {
+                    $keywords_data['manual'][] = array(
+                        'text' => $keyword,
+                        'type' => 'manual',
+                    );
                 }
             }
         }
-        
-        // Apply total limit: popular first, then manual
+
+        // Total limit: popular first, then manual.
         if ($total_limit > 0) {
-            $pop_count = count($keywords_data['popular']);
-            if ($pop_count >= $total_limit) {
-                $keywords_data['popular'] = array_slice($keywords_data['popular'], 0, $total_limit);
-                $keywords_data['manual'] = array();
-            } else {
-                $remaining = $total_limit - $pop_count;
-                $keywords_data['manual'] = array_slice($keywords_data['manual'], 0, $remaining);
-            }
+            $keywords_data['popular'] = array_slice($keywords_data['popular'], 0, $total_limit);
+            $keywords_data['manual']  = array_slice($keywords_data['manual'], 0, max(0, $total_limit - count($keywords_data['popular'])));
         }
-        
-        // Build type labels map: post_type/taxonomy slug => translated singular label
-        // Built at page-load time so WPML language is already set correctly.
+
+        // Translated singular labels per post type / taxonomy (built per request,
+        // so the multilingual plugin's current language is already set).
         $type_labels = array();
-        $active_post_types = get_option('cik_search_predictive_post_types', array('post', 'page'));
-        foreach ($active_post_types as $pt) {
-            $pto = get_post_type_object($pt);
-            if ($pto) {
-                $type_labels[$pt] = $pto->labels->singular_name;
+        foreach ((array) get_option('cik_search_predictive_post_types', array('post', 'page')) as $post_type) {
+            $label = $this->get_post_type_label($post_type);
+            if ($label !== '') {
+                $type_labels[$post_type] = $label;
             }
         }
-        $active_taxonomies = get_option('cik_search_predictive_taxonomies', array());
-        foreach ($active_taxonomies as $tax) {
-            $tax_obj = get_taxonomy($tax);
-            if ($tax_obj) {
-                $type_labels[$tax] = $tax_obj->labels->singular_name;
+        foreach ((array) get_option('cik_search_predictive_taxonomies', array()) as $taxonomy) {
+            $taxonomy_object = get_taxonomy($taxonomy);
+            if ($taxonomy_object) {
+                $type_labels[$taxonomy] = $this->to_plain_text($taxonomy_object->labels->singular_name);
             }
         }
 
-        $predictive_settings = array(
-            'ajaxUrl' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('cik_search_predictive_search'),
-            'enabled' => (bool) get_option('cik_search_enable_predictive', 1),
-            'minChars' => get_option('cik_search_predictive_min_chars', 3),
-            'delay' => get_option('cik_search_predictive_delay', 300),
-            'maxResults' => get_option('cik_search_predictive_max_results', 5),
-            'postTypes' => get_option('cik_search_predictive_post_types', array('post', 'page')),
-            'keywordsSource' => get_option('cik_search_keywords_source', 'mixed'),
-            'preloadedKeywords' => $keywords_data, // All keywords/popular searches preloaded
-            'maxDisplayKeywords' => intval(get_option('cik_search_keywords_display_limit', 30)), // Display limit
-            'typeLabels' => $type_labels, // Translated labels per post type / taxonomy
-            'i18n' => array(
-                'searching'   => __( 'Search...', 'cik-smart-search' ),
+        return array(
+            'ajaxUrl'            => admin_url('admin-ajax.php'),
+            'nonce'              => wp_create_nonce('cik_search_predictive_search'),
+            'enabled'            => (bool) get_option('cik_search_enable_predictive', 1),
+            'minChars'           => (int) get_option('cik_search_predictive_min_chars', 3),
+            'delay'              => (int) get_option('cik_search_predictive_delay', 300),
+            'preloadedKeywords'  => $keywords_data,
+            'maxDisplayKeywords' => (int) get_option('cik_search_keywords_display_limit', 30),
+            'typeLabels'         => $type_labels,
+            'i18n'               => array(
+                'searching' => __('Searching...', 'cik-smart-search'),
             ),
         );
-        
-        wp_localize_script(
-            'cik-search-predictive',
-            'cikSearchPredictive',
-            $predictive_settings
-        );
     }
-    
+
     /**
      * Enqueue admin assets
      */
@@ -1206,7 +1186,10 @@ class Cik_Smart_Search {
         // Parse attributes
         $atts = shortcode_atts(array(
             'wrapper_class' => 'cik-search-position',
-        ), $atts);
+        ), $atts, 'cik_search');
+
+        // Scripts are only loaded on pages that contain a search box.
+        $this->enqueue_scripts();
         
         // Get options
         $search_title = get_option('cik_search_title', __('May interest you', 'cik-smart-search'));
@@ -1285,20 +1268,26 @@ class Cik_Smart_Search {
             wp_send_json_error(array('message' => 'Empty query'), 400);
         }
         
-        // Get settings
-        $cache_duration = get_option('cik_search_predictive_cache_duration', 5);
-        
-        // Check cache first (temporarily disabled for Greeklish testing)
-        $cache_key = 'cik_search_results_' . md5($query . serialize(get_option('cik_search_predictive_post_types', array())) . serialize(get_option('cik_search_predictive_taxonomies', array())));
-        $cached_results = false; // Temporarily disabled for testing
-        
-        if ($cached_results !== false) {
+        $cache_duration = max(1, (int) get_option('cik_search_predictive_cache_duration', 5));
+        $max_results    = max(1, min(20, (int) get_option('cik_search_predictive_max_results', 5)));
+        $post_types     = (array) get_option('cik_search_predictive_post_types', array('post', 'page'));
+        $taxonomies     = (array) get_option('cik_search_predictive_taxonomies', array());
+
+        // Results are cached per query, language and settings. The cache version
+        // is bumped whenever content or settings change (see clear_predictive_cache()),
+        // which also works with persistent object caches.
+        $cache_key = 'cik_search_results_' . md5(wp_json_encode(array(
+            $query,
+            $this->get_current_language(),
+            $post_types,
+            $taxonomies,
+            (int) get_option('cik_search_cache_version', 1),
+        )));
+
+        $cached_results = get_transient($cache_key);
+        if (is_array($cached_results)) {
             wp_send_json_success($cached_results);
         }
-        
-        // Get settings
-        $max_results = get_option('cik_search_predictive_max_results', 5);
-        $post_types = get_option('cik_search_predictive_post_types', array('post', 'page'));
 
         $show_images = get_option('cik_search_predictive_show_images', 1);
         $show_excerpt = get_option('cik_search_predictive_show_excerpt', 1);
@@ -1308,30 +1297,19 @@ class Cik_Smart_Search {
         if ($search_title_only) {
             add_filter('posts_search', array($this, 'search_by_title_only'), 500, 2);
         }
-        
-        // For predictive search, don't use Greeklish conversion
-        // It causes false positives (e.g., "Oil" -> "οιλ") and uses AND instead of OR
-        // Users can type in Greek directly for Greek results
-        $search_query_text = $query;
-        
-        /* Greeklish conversion disabled for predictive search
-        $current_lang = $this->get_current_language();
-        
-        if ($current_lang === 'el' && $this->is_likely_greeklish($query)) {
-            $greek_version = $this->greeklish_to_greek($query);
-            $search_query_text = $query . ' ' . $greek_version;
-        }
-        */
-        
+
+        // Greeklish conversion is intentionally not applied to the post query:
+        // it caused false positives (e.g. "Oil" -> "οιλ"). It is only used for
+        // highlighting and taxonomy matching.
         $args = array(
-            's'                      => $search_query_text,
+            's'                      => $query,
             'post_type'              => $post_types,
             'posts_per_page'         => $max_results,
             'post_status'            => 'publish',
             'orderby'                => 'relevance',
             'order'                  => 'DESC',
-            'no_found_rows'          => true,
-            'update_post_meta_cache' => false,
+            'no_found_rows'          => true,  // No SQL_CALC_FOUND_ROWS: we never paginate.
+            'update_post_meta_cache' => true,  // One batched query for thumbnails/meta instead of one per post.
             'update_post_term_cache' => false,
             'ignore_sticky_posts'    => true,
             'suppress_filters'       => false,
@@ -1409,7 +1387,6 @@ class Cik_Smart_Search {
         }
         
         // Search in taxonomies if enabled
-        $taxonomies = get_option('cik_search_predictive_taxonomies', array());
         if (!empty($taxonomies) && count($results) < $max_results) {
             $taxonomy_results = $this->search_taxonomies($query, $taxonomies, $max_results - count($results));
             $results = array_merge($results, $taxonomy_results);
@@ -1579,7 +1556,7 @@ class Cik_Smart_Search {
         global $wpdb;
         
         // Get searches from last 30 days with search count from meta
-        $date_from = date('Y-m-d', strtotime('-30 days'));
+        $date_from = gmdate('Y-m-d H:i:s', time() - 30 * DAY_IN_SECONDS);
         
         // Query using _search_count and _results_count meta fields, ordered by searches then results
         if ($limit > 0) {
@@ -1592,7 +1569,7 @@ class Cik_Smart_Search {
                 LEFT JOIN {$wpdb->postmeta} pm_results ON p.ID = pm_results.post_id AND pm_results.meta_key = '_results_count'
                 WHERE p.post_type = 'cik_search_log'
                 AND p.post_status = 'publish'
-                AND p.post_modified >= %s
+                AND p.post_modified_gmt >= %s
                 AND p.post_title != ''
                 ORDER BY count DESC, results DESC, p.post_modified DESC
                 LIMIT %d
@@ -1607,7 +1584,7 @@ class Cik_Smart_Search {
                 LEFT JOIN {$wpdb->postmeta} pm_results ON p.ID = pm_results.post_id AND pm_results.meta_key = '_results_count'
                 WHERE p.post_type = 'cik_search_log'
                 AND p.post_status = 'publish'
-                AND p.post_modified >= %s
+                AND p.post_modified_gmt >= %s
                 AND p.post_title != ''
                 ORDER BY count DESC, results DESC, p.post_modified DESC
             ", $date_from);
@@ -2225,12 +2202,24 @@ class Cik_Smart_Search {
     }
     
     /**
-     * Clear predictive search cache when content changes
+     * Invalidate cached predictive results.
+     *
+     * Instead of deleting transients with a LIKE query on wp_options (which does
+     * nothing when a persistent object cache is used), the cache version that is
+     * part of every cache key is incremented. Old entries simply expire.
+     *
+     * @param int|null $post_id Post being saved/deleted (null when called manually).
      */
     public function clear_predictive_cache($post_id = null) {
-        // Delete all transients that start with our prefix
-        global $wpdb;
-        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_cik_search_results_%' OR option_name LIKE '_transient_timeout_cik_search_results_%'");
+        if ($post_id) {
+            // Ignore autosaves, revisions and our own search-log entries
+            // (a log entry is written on every front-end search).
+            if (wp_is_post_revision($post_id) || wp_is_post_autosave($post_id) || get_post_type($post_id) === 'cik_search_log') {
+                return;
+            }
+        }
+
+        update_option('cik_search_cache_version', (int) get_option('cik_search_cache_version', 1) + 1);
     }
     
     /**
@@ -2408,11 +2397,19 @@ class Cik_Smart_Search {
             update_post_meta($post_id, '_search_count', $new_count);
             update_post_meta($post_id, '_last_search_time', current_time('timestamp'));
 
-            wp_update_post(array(
-                'ID'               => $post_id,
-                'post_modified'    => current_time('mysql'),
-                'post_modified_gmt'=> current_time('mysql', 1),
-            ));
+            // Touch the "last search" date directly: wp_update_post() would run
+            // the full save_post hook chain on every front-end search.
+            $wpdb->update(
+                $wpdb->posts,
+                array(
+                    'post_modified'     => current_time('mysql'),
+                    'post_modified_gmt' => current_time('mysql', 1),
+                ),
+                array('ID' => $post_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+            clean_post_cache($post_id);
 
         } else {
             // Create new search log post
@@ -2591,33 +2588,40 @@ class Cik_Smart_Search {
      * Cleanup old search logs based on retention setting
      */
     public function cleanup_old_logs() {
-        $settings = $this->get_analytics_settings();
-        $retention_days = $settings['retention'];
-        
-        // If 0 or not set, keep forever
-        if (empty($retention_days)) {
+        $settings       = $this->get_analytics_settings();
+        $retention_days = (int) $settings['retention'];
+
+        // 0 = keep forever.
+        if ($retention_days <= 0) {
             return;
         }
-        
-        $cutoff_date = date('Y-m-d', strtotime('-' . intval($retention_days) . ' days'));
-        
-        $old_logs = get_posts(array(
-            'post_type'      => 'cik_search_log',
-            'posts_per_page' => -1,
-            'date_query'     => array(
-                array(
-                    'before' => $cutoff_date,
+
+        $cutoff_date = gmdate('Y-m-d H:i:s', time() - $retention_days * DAY_IN_SECONDS);
+
+        // Delete in batches so a large backlog cannot exhaust memory or time out.
+        for ($batch = 0; $batch < 20; $batch++) {
+            $old_logs = get_posts(array(
+                'post_type'        => 'cik_search_log',
+                'post_status'      => 'any',
+                'posts_per_page'   => 200,
+                'fields'           => 'ids',
+                'no_found_rows'    => true,
+                'suppress_filters' => true,
+                'date_query'       => array(
+                    array(
+                        'column' => 'post_date_gmt',
+                        'before' => $cutoff_date,
+                    ),
                 ),
-            ),
-            'fields'         => 'ids',
-        ));
-        
-        foreach ($old_logs as $log_id) {
-            wp_delete_post($log_id, true); // Force delete (skip trash)
-        }
-        
-        if (!empty($old_logs)) {
-            error_log('Smart Search: Cleaned up ' . count($old_logs) . ' old search logs');
+            ));
+
+            if (empty($old_logs)) {
+                break;
+            }
+
+            foreach ($old_logs as $log_id) {
+                wp_delete_post($log_id, true); // Skip the trash.
+            }
         }
     }
 }
