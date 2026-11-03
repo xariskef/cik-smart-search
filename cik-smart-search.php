@@ -99,11 +99,9 @@ class Cik_Smart_Search {
         add_filter('manage_edit-cik_search_log_sortable_columns', array($this, 'search_log_sortable_columns'));
         add_action('pre_get_posts', array($this, 'search_log_orderby'));
         
-        // Data retention cron
+        // Data retention cron (scheduled on activation; re-created here if it was lost).
         add_action('cik_search_cleanup', array($this, 'cleanup_old_logs'));
-        if (!wp_next_scheduled('cik_search_cleanup')) {
-            wp_schedule_event(time(), 'daily', 'cik_search_cleanup');
-        }
+        add_action('admin_init', array(__CLASS__, 'schedule_cleanup'));
         
         // Admin styles
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_assets'));
@@ -1330,6 +1328,17 @@ class Cik_Smart_Search {
             'suppress_filters'       => false,
         );
         
+        /**
+         * Filter the WP_Query arguments of the predictive search.
+         *
+         * Useful to add a custom post type (e.g. an index of PDF documents)
+         * or a meta/tax query, such as restricting results by language.
+         *
+         * @param array  $args  WP_Query arguments.
+         * @param string $query Sanitized search string.
+         */
+        $args = apply_filters('cik_search_query_args', $args, $query);
+
         $search_query = new WP_Query($args);
         
         // Remove filter after query
@@ -1395,6 +1404,18 @@ class Cik_Smart_Search {
                 // Check if match is in title (for prioritization)
                 $result['match_in_title'] = $this->has_match_in_title(get_the_title(), $query);
                 
+                /**
+                 * Filter a single predictive result before it is returned.
+                 *
+                 * For example, point 'url' to a file instead of the post permalink.
+                 * Text fields are rendered with textContent; 'matched_content'
+                 * must stay escaped HTML.
+                 *
+                 * @param array   $result Result data.
+                 * @param WP_Post $post   The matched post.
+                 */
+                $result = apply_filters('cik_search_result', $result, get_post());
+
                 $results[] = $result;
             }
             wp_reset_postdata();
@@ -2499,7 +2520,26 @@ class Cik_Smart_Search {
             }
         }
     }
+
+    /**
+     * Schedule the daily retention cleanup.
+     */
+    public static function schedule_cleanup() {
+        if (!wp_next_scheduled('cik_search_cleanup')) {
+            wp_schedule_event(time(), 'daily', 'cik_search_cleanup');
+        }
+    }
+
+    /**
+     * Plugin deactivation: stop the scheduled cleanup (data is kept until uninstall).
+     */
+    public static function deactivate() {
+        wp_clear_scheduled_hook('cik_search_cleanup');
+    }
 }
+
+register_activation_hook(__FILE__, array('Cik_Smart_Search', 'schedule_cleanup'));
+register_deactivation_hook(__FILE__, array('Cik_Smart_Search', 'deactivate'));
 
 /**
  * Initialize plugin
