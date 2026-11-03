@@ -87,10 +87,6 @@ class Cik_Smart_Search {
         add_action('wp_ajax_cik_search_predictive_search', array($this, 'ajax_predictive_search'));
         add_action('wp_ajax_nopriv_cik_search_predictive_search', array($this, 'ajax_predictive_search'));
         
-        // Suggested Keywords AJAX
-        add_action('wp_ajax_cik_search_get_suggestions', array($this, 'ajax_get_suggestions'));
-        add_action('wp_ajax_nopriv_cik_search_get_suggestions', array($this, 'ajax_get_suggestions'));
-        
         // Clear predictive search cache when posts are updated
         add_action('save_post', array($this, 'clear_predictive_cache'));
         add_action('delete_post', array($this, 'clear_predictive_cache'));
@@ -1355,7 +1351,6 @@ class Cik_Smart_Search {
                     'url'       => esc_url_raw(get_permalink()),
                     'post_type' => $post_type,
                     'type'      => $this->get_post_type_label($post_type),
-                    'date'      => get_the_date(),
                 );
                 
                 // Add featured image if enabled (optimized - no full post object)
@@ -1438,108 +1433,6 @@ class Cik_Smart_Search {
         set_transient($cache_key, $results, $cache_duration * MINUTE_IN_SECONDS);
         
         wp_send_json_success($results);
-    }
-    
-    /**
-     * AJAX handler for suggested keywords with server-side filtering
-     */
-    public function ajax_get_suggestions() {
-        // Verify nonce
-        check_ajax_referer('cik_search_predictive_search', 'nonce');
-        
-        // Get query parameter for filtering
-        $query = isset($_GET['query']) ? sanitize_text_field($_GET['query']) : '';
-        $query = trim($query);
-        
-        $suggestions = array(
-            'manual' => array(),
-            'popular' => array()
-        );
-        
-        // Don't return keywords for empty query - only when user types
-        if (empty($query)) {
-            wp_send_json_success($suggestions);
-            return;
-        }
-        
-        // Pre-normalize query ONCE for all matching
-        $normalized_query = $this->remove_greek_accents(mb_strtolower($query, 'UTF-8'));
-        
-        // Get keywords source setting
-        $keywords_source = get_option('cik_search_keywords_source', 'mixed');
-        
-        // Get manual keywords (only if source is 'mixed')
-        if ($keywords_source !== 'popular_only') {
-            // Try to get from wp_cache first (object cache)
-            $cache_key = 'cik_search_manual_keywords';
-            $manual_keywords = wp_cache_get($cache_key);
-            
-            if ($manual_keywords === false) {
-                // Not in cache, get from database
-                $manual_keywords = get_option('cik_search_suggested_keywords', array());
-                
-                // Store in object cache for 1 hour
-                wp_cache_set($cache_key, $manual_keywords, '', 3600);
-            }
-            
-            if (!empty($manual_keywords)) {
-                foreach ($manual_keywords as $keyword) {
-                    // Fast matching with pre-normalized query
-                    $normalized_keyword = $this->remove_greek_accents(mb_strtolower($keyword, 'UTF-8'));
-                    
-                    if (mb_strpos($normalized_keyword, $normalized_query, 0, 'UTF-8') !== false) {
-                        $suggestions['manual'][] = array(
-                            'text' => $keyword,
-                            'type' => 'manual'
-                        );
-                    }
-                }
-            }
-        }
-        
-        // Get popular searches from analytics (if enabled)
-        $show_popular = get_option('cik_search_show_popular_searches', 1);
-        $enable_analytics = get_option('cik_search_enable_analytics', 1);
-        
-        if ($show_popular && $enable_analytics) {
-            $limit = get_option('cik_search_popular_searches_limit', 5);
-            $popular_searches = $this->get_popular_searches($limit);
-            
-            foreach ($popular_searches as $search) {
-                // Fast matching with pre-normalized query
-                $normalized_search = $this->remove_greek_accents(mb_strtolower($search['query'], 'UTF-8'));
-                
-                if (mb_strpos($normalized_search, $normalized_query, 0, 'UTF-8') !== false) {
-                    $suggestions['popular'][] = array(
-                        'text' => $search['query'],
-                        'count' => $search['count'],
-                        'type' => 'popular'
-                    );
-                }
-            }
-        }
-        
-        wp_send_json_success($suggestions);
-    }
-    
-    /**
-     * Check if text matches query (accent-insensitive for Greek)
-     * 
-     * @param string $text Text to search in
-     * @param string $query Query to search for
-     * @return bool True if matches
-     */
-    private function matches_query_accent_insensitive($text, $query) {
-        // Convert to lowercase
-        $text = mb_strtolower($text, 'UTF-8');
-        $query = mb_strtolower($query, 'UTF-8');
-        
-        // Remove Greek accents
-        $text = $this->remove_greek_accents($text);
-        $query = $this->remove_greek_accents($query);
-        
-        // Check if text contains query
-        return mb_strpos($text, $query, 0, 'UTF-8') !== false;
     }
     
     /**
@@ -1633,18 +1526,6 @@ class Cik_Smart_Search {
         
         if (empty($taxonomies) || empty($query)) {
             return $results;
-        }
-        
-        // Prepare search query (Greeklish support)
-        $current_lang = $this->get_current_language();
-        $search_terms = array($query);
-        
-        // Add Greek version if Greeklish
-        if ($current_lang === 'el' && $this->is_likely_greeklish($query)) {
-            $greek_version = $this->greeklish_to_greek($query);
-            if ($greek_version !== $query) {
-                $search_terms[] = $greek_version;
-            }
         }
         
         // Search for terms that match the query
@@ -2284,9 +2165,6 @@ class Cik_Smart_Search {
         
         register_post_type('cik_search_log', $args);
         
-        // Ensure database index exists for performance
-        $this->ensure_search_log_index();
-
         // Migrate existing records that lack _search_term_normalized
         $this->migrate_search_log_normalized();
     }
@@ -2322,28 +2200,6 @@ class Cik_Smart_Search {
         if (count($posts) < 500) {
             update_option('cik_search_normalized_migrated', true);
         }
-    }
-    
-    /**
-     * Ensure database index exists for fast queries
-     */
-    private function ensure_search_log_index() {
-        global $wpdb;
-        
-        // Check if we've already done this
-        $index_created = get_option('cik_search_index_created', false);
-        if ($index_created) {
-            return;
-        }
-        
-        // Create composite index for fast filtering
-        $wpdb->query("
-            ALTER TABLE {$wpdb->posts} 
-            ADD INDEX IF NOT EXISTS idx_search_log_type_date (post_type, post_date, post_status)
-        ");
-        
-        // Mark as created
-        update_option('cik_search_index_created', true);
     }
     
     /**

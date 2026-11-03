@@ -1,115 +1,94 @@
 /**
  * Smart Search - Placeholder Animation
- * Typewriter effect for search placeholder
+ *
+ * Typewriter effect that cycles through the placeholder texts set in the
+ * admin. With a single text it is typed once and stays. The animation pauses
+ * while the field has focus.
  */
-(function() {
+(function () {
     'use strict';
-    
-    // Get the search input
-    const searchInput = document.querySelector('.cik-search-form input[type="search"]');
-    
-    if (!searchInput) {
-        return;
-    }
-    
-    // Get placeholder texts from localized data
-    const placeholders = window.cikSearchPlaceholders || [];
-    
+
+    const placeholders = Array.isArray(window.cikSearchPlaceholders) ? window.cikSearchPlaceholders : [];
     if (placeholders.length === 0) {
         return;
     }
-    
-    let currentIndex = 0;
-    let currentText = '';
-    let isDeleting = false;
-    let charIndex = 0;
-    let typingSpeed = 100;
-    let deletingSpeed = 50;
-    let delayBetweenWords = 2000;
-    let animationTimeout = null;
-    let isAnimating = false;
-    
-    // Check if we have only one placeholder
-    const singlePlaceholder = placeholders.length === 1;
-    
-    function type() {
-        const currentPlaceholder = placeholders[currentIndex];
-        
-        if (isDeleting) {
-            // Deleting
-            currentText = currentPlaceholder.substring(0, charIndex - 1);
-            charIndex--;
-        } else {
-            // Typing
-            currentText = currentPlaceholder.substring(0, charIndex + 1);
-            charIndex++;
-        }
-        
-        // Update placeholder
-        searchInput.setAttribute('placeholder', currentText);
-        
-        // Determine speed
-        let speed = isDeleting ? deletingSpeed : typingSpeed;
-        
-        // Check if word is complete
-        if (!isDeleting && charIndex === currentPlaceholder.length) {
-            // If single placeholder, stop here - don't delete or loop
-            if (singlePlaceholder) {
-                isAnimating = false;
-                return; // Stop animation
+
+    const TYPING_SPEED = 100;
+    const DELETING_SPEED = 50;
+    const PAUSE_AFTER_WORD = 2000;
+    const PAUSE_BEFORE_WORD = 500;
+
+    // Respect users who prefer reduced motion: show the first text, no animation.
+    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function animate(searchInput) {
+        let currentIndex = 0;
+        let charIndex = 0;
+        let isDeleting = false;
+        let timeout = null;
+        let isAnimating = false;
+
+        function type() {
+            const text = placeholders[currentIndex];
+            charIndex += isDeleting ? -1 : 1;
+            searchInput.setAttribute('placeholder', text.substring(0, charIndex));
+
+            let speed = isDeleting ? DELETING_SPEED : TYPING_SPEED;
+
+            if (!isDeleting && charIndex === text.length) {
+                if (placeholders.length === 1) {
+                    isAnimating = false;
+                    return; // Single text: stop once fully typed.
+                }
+                speed = PAUSE_AFTER_WORD;
+                isDeleting = true;
+            } else if (isDeleting && charIndex === 0) {
+                isDeleting = false;
+                currentIndex = (currentIndex + 1) % placeholders.length;
+                speed = PAUSE_BEFORE_WORD;
             }
-            
-            // Pause at end of word (for multiple placeholders)
-            speed = delayBetweenWords;
-            isDeleting = true;
-        } else if (isDeleting && charIndex === 0) {
-            // Move to next word
+
+            timeout = setTimeout(type, speed);
+        }
+
+        function stop() {
+            clearTimeout(timeout);
+            timeout = null;
+            isAnimating = false;
+        }
+
+        function start() {
+            if (isAnimating) {
+                return;
+            }
+            currentIndex = 0;
+            charIndex = 0;
             isDeleting = false;
-            currentIndex = (currentIndex + 1) % placeholders.length;
-            speed = 500; // Small pause before starting next word
+            isAnimating = true;
+            type();
         }
-        
-        animationTimeout = setTimeout(type, speed);
-    }
-    
-    function stopAnimation() {
-        if (animationTimeout) {
-            clearTimeout(animationTimeout);
-            animationTimeout = null;
+
+        searchInput.addEventListener('focus', function () {
+            stop();
+            searchInput.setAttribute('placeholder', placeholders[0]);
+        });
+
+        searchInput.addEventListener('blur', function () {
+            if (searchInput.value === '') {
+                start();
+            }
+        });
+
+        if (document.activeElement !== searchInput) {
+            start();
         }
-        isAnimating = false;
     }
-    
-    function startAnimation() {
-        if (isAnimating) return; // Already running
-        
-        // Reset to initial state
-        currentIndex = 0;
-        charIndex = 0;
-        isDeleting = false;
-        currentText = '';
-        isAnimating = true;
-        
-        type();
-    }
-    
-    // Only start animation if input is not focused
-    searchInput.addEventListener('focus', function() {
-        // Stop animation and show full placeholder
-        stopAnimation();
-        searchInput.setAttribute('placeholder', placeholders[0]);
-    });
-    
-    searchInput.addEventListener('blur', function() {
-        // Resume animation if input is empty
-        if (searchInput.value === '') {
-            startAnimation();
+
+    document.querySelectorAll('.cik-search-form input[type="search"]').forEach(function (input) {
+        if (reduceMotion) {
+            input.setAttribute('placeholder', placeholders[0]);
+        } else {
+            animate(input);
         }
     });
-    
-    // Start the animation on page load
-    if (document.activeElement !== searchInput) {
-        startAnimation();
-    }
-    
 })();
