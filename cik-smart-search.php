@@ -71,6 +71,10 @@ class Cik_Smart_Search {
      * Initialize hooks
      */
     private function init_hooks() {
+        // Register scripts early: block themes render shortcodes before
+        // wp_enqueue_scripts fires, and wp_localize_script() needs a registered handle.
+        add_action('init', array($this, 'register_scripts'));
+
         // Enqueue assets
         add_action('wp_enqueue_scripts', array($this, 'enqueue_assets'));
         
@@ -108,7 +112,7 @@ class Cik_Smart_Search {
     }
     
     /**
-     * Register front-end assets.
+     * Enqueue front-end styles.
      *
      * The (small) stylesheets are enqueued on every front-end page so the box
      * renders without a flash of unstyled content when a theme prints the
@@ -138,6 +142,18 @@ class Cik_Smart_Search {
             array(),
             CIK_SEARCH_VERSION
         );
+    }
+
+    /**
+     * Register the front-end scripts (enqueued later by the shortcode).
+     *
+     * Runs on `init` so the handles exist before any content is rendered;
+     * otherwise wp_localize_script() silently drops the settings in block themes.
+     */
+    public function register_scripts() {
+        if (is_admin()) {
+            return;
+        }
 
         wp_register_script(
             'cik-search-voice',
