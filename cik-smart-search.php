@@ -80,9 +80,6 @@ class Cik_Smart_Search {
         // Admin menu
         add_action('admin_menu', array($this, 'register_admin_menu'));
         
-        // Register settings
-        add_action('admin_init', array($this, 'register_settings'));
-        
         // Add settings link
         add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_settings_link'));
         
@@ -369,39 +366,177 @@ class Cik_Smart_Search {
     }
     
     /**
-     * Register settings
+     * Read a text field from the submitted settings form.
+     *
+     * @param string $key     Field name.
+     * @param string $default Value when the field is missing.
+     * @return string Sanitized value.
      */
-    public function register_settings() {
-        // Search Box Settings
-        register_setting('cik_search_settings', 'cik_search_placeholder');
-        register_setting('cik_search_settings', 'cik_search_placeholder_en');
-        register_setting('cik_search_settings', 'cik_search_placeholders');
-        register_setting('cik_search_settings', 'cik_search_placeholders_en');
-        register_setting('cik_search_settings', 'cik_search_title');
-        register_setting('cik_search_settings', 'cik_search_title_en');
-        register_setting('cik_search_settings', 'cik_search_results_title_en');
-        register_setting('cik_search_settings', 'cik_search_tags');
-        
-        // Predictive Search Settings
-        register_setting('cik_search_settings', 'cik_search_enable_predictive');
-        register_setting('cik_search_settings', 'cik_search_predictive_min_chars');
-        register_setting('cik_search_settings', 'cik_search_predictive_delay');
-        register_setting('cik_search_settings', 'cik_search_predictive_max_results');
-        register_setting('cik_search_settings', 'cik_search_predictive_post_types');
-        register_setting('cik_search_settings', 'cik_search_predictive_show_images');
-        register_setting('cik_search_settings', 'cik_search_predictive_show_excerpt');
-        register_setting('cik_search_settings', 'cik_search_predictive_search_title_only');
-        register_setting('cik_search_settings', 'cik_search_predictive_cache_duration');
-        
-        // Voice Search Settings
-        register_setting('cik_search_settings', 'cik_search_voice_auto_submit');
-        register_setting('cik_search_settings', 'cik_search_voice_listening_color');
-        register_setting('cik_search_settings', 'cik_search_voice_language');
-        
-        // Analytics Settings
-        register_setting('cik_search_settings', 'cik_search_enable_analytics');
-        register_setting('cik_search_settings', 'cik_search_log_ip');
-        register_setting('cik_search_settings', 'cik_search_analytics_retention');
+    private function posted_text($key, $default = '') {
+        if (!isset($_POST[$key])) { // phpcs:ignore WordPress.Security.NonceVerification -- verified in render_settings_page().
+            return $default;
+        }
+
+        return sanitize_text_field(wp_unslash($_POST[$key])); // phpcs:ignore WordPress.Security.NonceVerification
+    }
+
+    /**
+     * Read an integer field and clamp it to a range.
+     *
+     * @param string $key     Field name.
+     * @param int    $default Value when the field is missing.
+     * @param int    $min     Minimum allowed value.
+     * @param int    $max     Maximum allowed value.
+     * @return int
+     */
+    private function posted_int($key, $default, $min, $max) {
+        $value = isset($_POST[$key]) ? (int) $_POST[$key] : $default; // phpcs:ignore WordPress.Security.NonceVerification
+
+        return max($min, min($max, $value));
+    }
+
+    /**
+     * Read a checkbox field.
+     *
+     * @param string $key Field name.
+     * @return int 1 or 0.
+     */
+    private function posted_flag($key) {
+        return isset($_POST[$key]) ? 1 : 0; // phpcs:ignore WordPress.Security.NonceVerification
+    }
+
+    /**
+     * Read a list of text values (repeater fields), dropping empty entries.
+     *
+     * @param string $key Field name.
+     * @return array
+     */
+    private function posted_text_list($key) {
+        $values = array();
+        if (empty($_POST[$key]) || !is_array($_POST[$key])) { // phpcs:ignore WordPress.Security.NonceVerification
+            return $values;
+        }
+
+        foreach (wp_unslash($_POST[$key]) as $text) { // phpcs:ignore WordPress.Security.NonceVerification
+            $text = is_string($text) ? sanitize_text_field($text) : '';
+            if ($text !== '') {
+                $values[] = $text;
+            }
+        }
+
+        return $values;
+    }
+
+    /**
+     * Read a list of slugs and keep only the allowed ones.
+     *
+     * @param string $key     Field name.
+     * @param array  $allowed Allowed slugs.
+     * @return array
+     */
+    private function posted_slugs($key, $allowed) {
+        if (empty($_POST[$key]) || !is_array($_POST[$key])) { // phpcs:ignore WordPress.Security.NonceVerification
+            return array();
+        }
+
+        $slugs = array_map('sanitize_key', wp_unslash($_POST[$key])); // phpcs:ignore WordPress.Security.NonceVerification
+
+        return array_values(array_intersect($slugs, $allowed));
+    }
+
+    /**
+     * Languages offered for voice recognition (BCP 47 tag => label).
+     *
+     * @return array
+     */
+    private function get_voice_languages() {
+        return array(
+            'el-GR' => 'Ελληνικά (Greek)',
+            'en-US' => 'English (US)',
+            'en-GB' => 'English (UK)',
+            'de-DE' => 'Deutsch (German)',
+            'fr-FR' => 'Français (French)',
+            'es-ES' => 'Español (Spanish)',
+            'it-IT' => 'Italiano (Italian)',
+        );
+    }
+
+    /**
+     * Validate and store the settings form.
+     *
+     * Called from render_settings_page() after the capability and nonce checks.
+     */
+    private function save_settings() {
+        // Search box texts.
+        update_option('cik_search_placeholder', $this->posted_text('cik_search_placeholder'));
+        update_option('cik_search_placeholder_en', $this->posted_text('cik_search_placeholder_en'));
+        update_option('cik_search_title', $this->posted_text('cik_search_title'));
+        update_option('cik_search_title_en', $this->posted_text('cik_search_title_en'));
+        update_option('cik_search_results_title', $this->posted_text('cik_search_results_title', 'Search Results'));
+        update_option('cik_search_results_title_en', $this->posted_text('cik_search_results_title_en'));
+        update_option('cik_search_placeholders', $this->posted_text_list('cik_search_placeholders'));
+        update_option('cik_search_placeholders_en', $this->posted_text_list('cik_search_placeholders_en'));
+
+        // Search tags (repeater with label + search term per language).
+        $tags = array();
+        if (!empty($_POST['cik_search_tags']) && is_array($_POST['cik_search_tags'])) { // phpcs:ignore WordPress.Security.NonceVerification
+            foreach (wp_unslash($_POST['cik_search_tags']) as $tag) { // phpcs:ignore WordPress.Security.NonceVerification
+                if (!is_array($tag) || empty($tag['label']) || empty($tag['search_term'])) {
+                    continue;
+                }
+                $tags[] = array(
+                    'label'          => sanitize_text_field($tag['label']),
+                    'search_term'    => sanitize_text_field($tag['search_term']),
+                    'label_en'       => sanitize_text_field(isset($tag['label_en']) ? $tag['label_en'] : ''),
+                    'search_term_en' => sanitize_text_field(isset($tag['search_term_en']) ? $tag['search_term_en'] : ''),
+                );
+            }
+        }
+        update_option('cik_search_tags', $tags);
+
+        // Predictive search. Post types and taxonomies must be public ones.
+        $public_post_types = array_values(array_diff(get_post_types(array('public' => true)), array('attachment')));
+        $public_taxonomies = array_values(get_taxonomies(array('public' => true)));
+
+        update_option('cik_search_enable_predictive', $this->posted_flag('cik_search_enable_predictive'));
+        update_option('cik_search_predictive_min_chars', $this->posted_int('cik_search_predictive_min_chars', 3, 1, 10));
+        update_option('cik_search_predictive_delay', $this->posted_int('cik_search_predictive_delay', 300, 100, 2000));
+        update_option('cik_search_predictive_max_results', $this->posted_int('cik_search_predictive_max_results', 5, 1, 20));
+        update_option('cik_search_predictive_post_types', $this->posted_slugs('cik_search_predictive_post_types', $public_post_types));
+        update_option('cik_search_predictive_taxonomies', $this->posted_slugs('cik_search_predictive_taxonomies', $public_taxonomies));
+        update_option('cik_search_prioritize_title_matches', $this->posted_flag('cik_search_prioritize_title_matches'));
+
+        // Suggested keywords.
+        update_option('cik_search_suggested_keywords', $this->posted_text_list('cik_search_suggested_keywords'));
+        wp_cache_delete('cik_search_manual_keywords');
+
+        $keywords_source = $this->posted_text('cik_search_keywords_source', 'mixed');
+        update_option('cik_search_show_popular_searches', $this->posted_flag('cik_search_show_popular_searches'));
+        update_option('cik_search_popular_searches_limit', $this->posted_int('cik_search_popular_searches_limit', 5, 0, 200));
+        update_option('cik_search_suggested_keywords_limit', $this->posted_int('cik_search_suggested_keywords_limit', 30, 0, 200));
+        update_option('cik_search_keywords_display_limit', $this->posted_int('cik_search_keywords_display_limit', 30, 0, 200));
+        update_option('cik_search_keywords_source', in_array($keywords_source, array('mixed', 'popular_only'), true) ? $keywords_source : 'mixed');
+
+        update_option('cik_search_predictive_show_images', $this->posted_flag('cik_search_predictive_show_images'));
+        update_option('cik_search_predictive_show_excerpt', $this->posted_flag('cik_search_predictive_show_excerpt'));
+        update_option('cik_search_predictive_show_matched_content', $this->posted_flag('cik_search_predictive_show_matched_content'));
+        update_option('cik_search_predictive_show_match_location', $this->posted_flag('cik_search_predictive_show_match_location'));
+        update_option('cik_search_predictive_search_title_only', $this->posted_flag('cik_search_predictive_search_title_only'));
+        update_option('cik_search_predictive_cache_duration', $this->posted_int('cik_search_predictive_cache_duration', 5, 1, 60));
+
+        // Voice search.
+        $voice_color    = sanitize_hex_color($this->posted_text('cik_search_voice_listening_color', '#22c55e'));
+        $voice_language = $this->posted_text('cik_search_voice_language', 'el-GR');
+        update_option('cik_search_voice_auto_submit', $this->posted_flag('cik_search_voice_auto_submit'));
+        update_option('cik_search_voice_listening_color', $voice_color ? $voice_color : '#22c55e');
+        update_option('cik_search_voice_language', array_key_exists($voice_language, $this->get_voice_languages()) ? $voice_language : 'el-GR');
+
+        // Analytics.
+        update_option('cik_search_enable_analytics', $this->posted_flag('cik_search_enable_analytics'));
+        update_option('cik_search_log_ip', $this->posted_flag('cik_search_log_ip'));
+        update_option('cik_search_analytics_retention', $this->posted_int('cik_search_analytics_retention', 90, 0, 365));
+
+        $this->clear_predictive_cache();
     }
     
     /**
@@ -417,112 +552,14 @@ class Cik_Smart_Search {
         if (isset($_POST['cik_search_clear_cache'])) {
             check_admin_referer('cik_search_settings');
             $this->clear_predictive_cache();
-            echo '<div class="updated"><p>' . __('Cache cleared successfully!', 'cik-smart-search') . '</p></div>';
+            echo '<div class="notice notice-success"><p>' . esc_html__('Cache cleared successfully!', 'cik-smart-search') . '</p></div>';
         }
-        
+
         // Save settings
         if (isset($_POST['cik_search_save'])) {
             check_admin_referer('cik_search_settings');
-            
-            // Save search box settings
-            update_option('cik_search_placeholder', sanitize_text_field($_POST['cik_search_placeholder'] ?? ''));
-            update_option('cik_search_placeholder_en', sanitize_text_field($_POST['cik_search_placeholder_en'] ?? ''));
-            update_option('cik_search_title', sanitize_text_field($_POST['cik_search_title'] ?? ''));
-            update_option('cik_search_title_en', sanitize_text_field($_POST['cik_search_title_en'] ?? ''));
-            update_option('cik_search_results_title', sanitize_text_field($_POST['cik_search_results_title'] ?? 'Search Results'));
-            update_option('cik_search_results_title_en', sanitize_text_field($_POST['cik_search_results_title_en'] ?? ''));
-
-            // Save animated placeholders (GR)
-            $placeholders = array();
-            if (isset($_POST['cik_search_placeholders']) && is_array($_POST['cik_search_placeholders'])) {
-                foreach ($_POST['cik_search_placeholders'] as $text) {
-                    $text = sanitize_text_field($text);
-                    if (!empty($text)) {
-                        $placeholders[] = $text;
-                    }
-                }
-            }
-            update_option('cik_search_placeholders', $placeholders);
-
-            // Save animated placeholders (EN)
-            $placeholders_en = array();
-            if (isset($_POST['cik_search_placeholders_en']) && is_array($_POST['cik_search_placeholders_en'])) {
-                foreach ($_POST['cik_search_placeholders_en'] as $text) {
-                    $text = sanitize_text_field($text);
-                    if (!empty($text)) {
-                        $placeholders_en[] = $text;
-                    }
-                }
-            }
-            update_option('cik_search_placeholders_en', $placeholders_en);
-            
-            // Save tags
-            $tags = array();
-            if (isset($_POST['cik_search_tags']) && is_array($_POST['cik_search_tags'])) {
-                foreach ($_POST['cik_search_tags'] as $tag) {
-                    if (!empty($tag['label']) && !empty($tag['search_term'])) {
-                        $tags[] = array(
-                            'label'          => sanitize_text_field($tag['label']),
-                            'search_term'    => sanitize_text_field($tag['search_term']),
-                            'label_en'       => sanitize_text_field($tag['label_en'] ?? ''),
-                            'search_term_en' => sanitize_text_field($tag['search_term_en'] ?? ''),
-                        );
-                    }
-                }
-            }
-            update_option('cik_search_tags', $tags);
-            
-            // Predictive search settings
-            update_option('cik_search_enable_predictive', isset($_POST['cik_search_enable_predictive']) ? 1 : 0);
-            update_option('cik_search_predictive_min_chars', intval($_POST['cik_search_predictive_min_chars'] ?? 3));
-            update_option('cik_search_predictive_delay', intval($_POST['cik_search_predictive_delay'] ?? 300));
-            update_option('cik_search_predictive_max_results', intval($_POST['cik_search_predictive_max_results'] ?? 5));
-            update_option('cik_search_predictive_post_types', $_POST['cik_search_predictive_post_types'] ?? array('post', 'page'));
-            update_option('cik_search_predictive_taxonomies', $_POST['cik_search_predictive_taxonomies'] ?? array());
-            update_option('cik_search_prioritize_title_matches', isset($_POST['cik_search_prioritize_title_matches']) ? 1 : 0);
-            
-            // Save suggested keywords
-            $suggested_keywords = array();
-            if (isset($_POST['cik_search_suggested_keywords']) && is_array($_POST['cik_search_suggested_keywords'])) {
-                foreach ($_POST['cik_search_suggested_keywords'] as $keyword) {
-                    $keyword = sanitize_text_field($keyword);
-                    if (!empty($keyword)) {
-                        $suggested_keywords[] = $keyword;
-                    }
-                }
-            }
-            update_option('cik_search_suggested_keywords', $suggested_keywords);
-            
-            // Clear wp_cache when keywords are updated
-            wp_cache_delete('cik_search_manual_keywords');
-            
-            update_option('cik_search_show_popular_searches', isset($_POST['cik_search_show_popular_searches']) ? 1 : 0);
-            update_option('cik_search_popular_searches_limit', intval($_POST['cik_search_popular_searches_limit'] ?? 5));
-            update_option('cik_search_suggested_keywords_limit', intval($_POST['cik_search_suggested_keywords_limit'] ?? 30));
-            update_option('cik_search_keywords_display_limit', intval($_POST['cik_search_keywords_display_limit'] ?? 30));
-            update_option('cik_search_keywords_source', sanitize_text_field($_POST['cik_search_keywords_source'] ?? 'mixed'));
-            
-            update_option('cik_search_predictive_show_images', isset($_POST['cik_search_predictive_show_images']) ? 1 : 0);
-            update_option('cik_search_predictive_show_excerpt', isset($_POST['cik_search_predictive_show_excerpt']) ? 1 : 0);
-            update_option('cik_search_predictive_show_matched_content', isset($_POST['cik_search_predictive_show_matched_content']) ? 1 : 0);
-            update_option('cik_search_predictive_show_match_location', isset($_POST['cik_search_predictive_show_match_location']) ? 1 : 0);
-            update_option('cik_search_predictive_search_title_only', isset($_POST['cik_search_predictive_search_title_only']) ? 1 : 0);
-            update_option('cik_search_predictive_cache_duration', intval($_POST['cik_search_predictive_cache_duration'] ?? 5));
-            
-            // Voice settings
-            update_option('cik_search_voice_auto_submit', isset($_POST['cik_search_voice_auto_submit']) ? 1 : 0);
-            update_option('cik_search_voice_listening_color', sanitize_hex_color($_POST['cik_search_voice_listening_color'] ?? '#22c55e'));
-            update_option('cik_search_voice_language', sanitize_text_field($_POST['cik_search_voice_language'] ?? 'el-GR'));
-            
-            // Analytics settings
-            update_option('cik_search_enable_analytics', isset($_POST['cik_search_enable_analytics']) ? 1 : 0);
-            update_option('cik_search_log_ip', isset($_POST['cik_search_log_ip']) ? 1 : 0);
-            update_option('cik_search_analytics_retention', intval($_POST['cik_search_analytics_retention'] ?? 90));
-            
-            // Clear predictive search cache after settings change
-            $this->clear_predictive_cache();
-            
-            echo '<div class="updated"><p>' . __('Settings saved successfully!', 'cik-smart-search') . '</p></div>';
+            $this->save_settings();
+            echo '<div class="notice notice-success"><p>' . esc_html__('Settings saved successfully!', 'cik-smart-search') . '</p></div>';
         }
         
         // Get current values
@@ -569,42 +606,42 @@ class Cik_Smart_Search {
                 <?php wp_nonce_field('cik_search_settings'); ?>
                 
                 <h2 class="nav-tab-wrapper">
-                    <a href="#tab-general" class="nav-tab nav-tab-active"><?php _e('General', 'cik-smart-search'); ?></a>
-                    <a href="#tab-search-box" class="nav-tab"><?php _e('Search Box', 'cik-smart-search'); ?></a>
-                    <a href="#tab-predictive" class="nav-tab"><?php _e('Predictive Search', 'cik-smart-search'); ?></a>
-                    <a href="#tab-voice" class="nav-tab"><?php _e('Voice Search', 'cik-smart-search'); ?></a>
-                    <a href="#tab-analytics" class="nav-tab"><?php _e('Analytics', 'cik-smart-search'); ?></a>
+                    <a href="#tab-general" class="nav-tab nav-tab-active"><?php esc_html_e('General', 'cik-smart-search'); ?></a>
+                    <a href="#tab-search-box" class="nav-tab"><?php esc_html_e('Search Box', 'cik-smart-search'); ?></a>
+                    <a href="#tab-predictive" class="nav-tab"><?php esc_html_e('Predictive Search', 'cik-smart-search'); ?></a>
+                    <a href="#tab-voice" class="nav-tab"><?php esc_html_e('Voice Search', 'cik-smart-search'); ?></a>
+                    <a href="#tab-analytics" class="nav-tab"><?php esc_html_e('Analytics', 'cik-smart-search'); ?></a>
                 </h2>
                 
                 <!-- Tab 1: General -->
                 <div id="tab-general" class="tab-content">
-                    <h3><?php _e('Search Content Settings', 'cik-smart-search'); ?></h3>
+                    <h3><?php esc_html_e('Search Content Settings', 'cik-smart-search'); ?></h3>
                     <table class="form-table">
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Post Types to Search', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Post Types to Search', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <?php
                                 $post_types = get_post_types(array('public' => true), 'objects');
                                 foreach ($post_types as $post_type) {
                                     if ($post_type->name === 'attachment') continue;
-                                    $checked = in_array($post_type->name, $predictive_post_types) ? 'checked' : '';
+                                    $checked = in_array($post_type->name, (array) $predictive_post_types, true);
                                     ?>
                                     <label style="display: block; margin-bottom: 8px;">
-                                        <input type="checkbox" name="cik_search_predictive_post_types[]" value="<?php echo esc_attr($post_type->name); ?>" <?php echo $checked; ?>>
+                                        <input type="checkbox" name="cik_search_predictive_post_types[]" value="<?php echo esc_attr($post_type->name); ?>" <?php checked($checked); ?>>
                                         <?php echo esc_html($post_type->labels->name); ?>
                                     </label>
                                     <?php
                                 }
                                 ?>
-                                <p class="description"><?php _e('Select which post types to include in search results', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Select which post types to include in search results', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Taxonomies to Search', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Taxonomies to Search', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <?php
@@ -614,39 +651,39 @@ class Cik_Smart_Search {
                                     if (in_array($taxonomy->name, array('post_format', 'nav_menu', 'link_category', 'wp_theme', 'wp_template_part_area'))) {
                                         continue;
                                     }
-                                    $checked = in_array($taxonomy->name, $predictive_taxonomies) ? 'checked' : '';
+                                    $checked = in_array($taxonomy->name, (array) $predictive_taxonomies, true);
                                     ?>
                                     <label style="display: block; margin-bottom: 8px;">
-                                        <input type="checkbox" name="cik_search_predictive_taxonomies[]" value="<?php echo esc_attr($taxonomy->name); ?>" <?php echo $checked; ?>>
+                                        <input type="checkbox" name="cik_search_predictive_taxonomies[]" value="<?php echo esc_attr($taxonomy->name); ?>" <?php checked($checked); ?>>
                                         <?php echo esc_html($taxonomy->labels->name); ?>
                                         <span style="color: #666; font-size: 11px;">(<?php echo esc_html($taxonomy->name); ?>)</span>
                                     </label>
                                     <?php
                                 }
                                 ?>
-                                <p class="description"><?php _e('Select which taxonomies (categories, tags, etc.) to include in search. When enabled, taxonomy terms will also appear in results.', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Select which taxonomies (categories, tags, etc.) to include in search. When enabled, taxonomy terms will also appear in results.', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_prioritize_title_matches"><?php _e('Results Order', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_prioritize_title_matches"><?php esc_html_e('Results Order', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_prioritize_title_matches" name="cik_search_prioritize_title_matches" value="1" <?php checked($prioritize_title_matches, 1); ?>>
-                                    <?php _e('Prioritize title matches over content matches', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Prioritize title matches over content matches', 'cik-smart-search'); ?>
                                 </label>
-                                <p class="description"><?php _e('When enabled, results matching in the title will appear first, followed by content matches. When disabled, results are ordered by WordPress relevance score.', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('When enabled, results matching in the title will appear first, followed by content matches. When disabled, results are ordered by WordPress relevance score.', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                     </table>
                     
-                    <h3 style="margin-top: 40px;"><?php _e('Suggested Keywords', 'cik-smart-search'); ?></h3>
+                    <h3 style="margin-top: 40px;"><?php esc_html_e('Suggested Keywords', 'cik-smart-search'); ?></h3>
                     <table class="form-table">
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Manual Keywords', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Manual Keywords', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <div id="suggested-keywords-list">
@@ -654,69 +691,69 @@ class Cik_Smart_Search {
                                         <?php foreach ($suggested_keywords as $index => $keyword): ?>
                                             <div class="keyword-item" style="margin-bottom: 8px; display: flex; gap: 8px; align-items: center;">
                                                 <input type="text" name="cik_search_suggested_keywords[]" value="<?php echo esc_attr($keyword); ?>" class="regular-text" placeholder="<?php esc_attr_e('Enter keyword', 'cik-smart-search'); ?>">
-                                                <button type="button" class="button remove-keyword" style="color: #dc2626;"><?php _e('Remove', 'cik-smart-search'); ?></button>
+                                                <button type="button" class="button remove-keyword" style="color: #dc2626;"><?php esc_html_e('Remove', 'cik-smart-search'); ?></button>
                                             </div>
                                         <?php endforeach; ?>
                                     <?php endif; ?>
                                 </div>
-                                <button type="button" id="add-keyword" class="button" style="margin-top: 8px;"><?php _e('+ Add Keyword', 'cik-smart-search'); ?></button>
-                                <p class="description"><?php _e('Add suggested search keywords that will appear when user clicks on search (before typing). Examples: "shoes", "summer offers", "gift cards"', 'cik-smart-search'); ?></p>
+                                <button type="button" id="add-keyword" class="button" style="margin-top: 8px;"><?php esc_html_e('+ Add Keyword', 'cik-smart-search'); ?></button>
+                                <p class="description"><?php esc_html_e('Add suggested search keywords that will appear when user clicks on search (before typing). Examples: "shoes", "summer offers", "gift cards"', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_show_popular_searches"><?php _e('Show Popular Searches', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_show_popular_searches"><?php esc_html_e('Show Popular Searches', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_show_popular_searches" name="cik_search_show_popular_searches" value="1" <?php checked($show_popular_searches, 1); ?>>
-                                    <?php _e('Show most popular searches from analytics', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Show most popular searches from analytics', 'cik-smart-search'); ?>
                                 </label>
-                                <p class="description"><?php _e('When enabled, displays trending searches based on real user data (requires Analytics)', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('When enabled, displays trending searches based on real user data (requires Analytics)', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_popular_searches_limit"><?php _e('Popular Searches Limit', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_popular_searches_limit"><?php esc_html_e('Popular Searches Limit', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_popular_searches_limit" name="cik_search_popular_searches_limit" value="<?php echo esc_attr($popular_searches_limit); ?>" min="0" style="width: 80px;">
-                                <p class="description"><?php _e('Maximum number of popular searches to fetch from analytics (0 = unlimited)', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Maximum number of popular searches to fetch from analytics (0 = unlimited)', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_suggested_keywords_limit"><?php _e('Max Suggested Keywords (fetch)', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_suggested_keywords_limit"><?php esc_html_e('Max Suggested Keywords (fetch)', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_suggested_keywords_limit" name="cik_search_suggested_keywords_limit" value="<?php echo esc_attr($suggested_keywords_limit); ?>" min="0" max="200" style="width: 80px;">
-                                <p class="description"><?php _e('Total keywords to prepare in the background (popular first, then manual). Default: 30. Set 0 for unlimited.', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Total keywords to prepare in the background (popular first, then manual). Default: 30. Set 0 for unlimited.', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_keywords_display_limit"><?php _e('Max Keywords Displayed', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_keywords_display_limit"><?php esc_html_e('Max Keywords Displayed', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_keywords_display_limit" name="cik_search_keywords_display_limit" value="<?php echo esc_attr($keywords_display_limit); ?>" min="0" max="200" style="width: 80px;">
-                                <p class="description"><?php _e('How many keywords actually appear in the search box UI. Applies both to the initial tags and when typing. Default: 30. Set 0 for unlimited.', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('How many keywords actually appear in the search box UI. Applies both to the initial tags and when typing. Default: 30. Set 0 for unlimited.', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_keywords_source"><?php _e('Keywords Source', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_keywords_source"><?php esc_html_e('Keywords Source', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <select id="cik_search_keywords_source" name="cik_search_keywords_source">
-                                    <option value="mixed" <?php selected($keywords_source, 'mixed'); ?>><?php _e('Manual Keywords + Popular Searches', 'cik-smart-search'); ?></option>
-                                    <option value="popular_only" <?php selected($keywords_source, 'popular_only'); ?>><?php _e('Only Popular Searches from Analytics', 'cik-smart-search'); ?></option>
+                                    <option value="mixed" <?php selected($keywords_source, 'mixed'); ?>><?php esc_html_e('Manual Keywords + Popular Searches', 'cik-smart-search'); ?></option>
+                                    <option value="popular_only" <?php selected($keywords_source, 'popular_only'); ?>><?php esc_html_e('Only Popular Searches from Analytics', 'cik-smart-search'); ?></option>
                                 </select>
-                                <p class="description"><?php _e('Choose whether to show manual keywords combined with popular searches, or only show popular searches from analytics', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Choose whether to show manual keywords combined with popular searches, or only show popular searches from analytics', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                     </table>
@@ -727,7 +764,7 @@ class Cik_Smart_Search {
                         $('#add-keyword').on('click', function() {
                             var html = '<div class="keyword-item" style="margin-bottom: 8px; display: flex; gap: 8px; align-items: center;">' +
                                 '<input type="text" name="cik_search_suggested_keywords[]" value="" class="regular-text" placeholder="<?php esc_attr_e('Enter keyword', 'cik-smart-search'); ?>">' +
-                                '<button type="button" class="button remove-keyword" style="color: #dc2626;"><?php _e('Remove', 'cik-smart-search'); ?></button>' +
+                                '<button type="button" class="button remove-keyword" style="color: #dc2626;"><?php esc_html_e('Remove', 'cik-smart-search'); ?></button>' +
                                 '</div>';
                             $('#suggested-keywords-list').append(html);
                         });
@@ -745,7 +782,7 @@ class Cik_Smart_Search {
                     <table class="form-table">
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Search Placeholder (Fallback)', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Search Placeholder (Fallback)', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <div style="display:flex;gap:12px;flex-wrap:wrap;">
@@ -758,13 +795,13 @@ class Cik_Smart_Search {
                                         <input type="text" id="cik_search_placeholder_en" name="cik_search_placeholder_en" value="<?php echo esc_attr($search_placeholder_en); ?>" class="regular-text">
                                     </div>
                                 </div>
-                                <p class="description"><?php _e('This is used as fallback if animated placeholders are not set', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('This is used as fallback if animated placeholders are not set', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Animated Placeholders', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Animated Placeholders', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <div style="display:flex;gap:24px;flex-wrap:wrap;">
@@ -773,33 +810,33 @@ class Cik_Smart_Search {
                                         <div id="placeholders-container">
                                             <?php foreach ($search_placeholders as $index => $placeholder_text) : ?>
                                                 <div class="placeholder-row" style="margin-bottom:8px;">
-                                                    <input type="text" name="cik_search_placeholders[<?php echo $index; ?>]" value="<?php echo esc_attr($placeholder_text); ?>" placeholder="<?php _e('Placeholder text', 'cik-smart-search'); ?>" style="width:300px;">
+                                                    <input type="text" name="cik_search_placeholders[<?php echo absint($index); ?>]" value="<?php echo esc_attr($placeholder_text); ?>" placeholder="<?php esc_attr_e('Placeholder text', 'cik-smart-search'); ?>" style="width:300px;">
                                                     <button type="button" class="button remove-placeholder">&times;</button>
                                                 </div>
                                             <?php endforeach; ?>
                                         </div>
-                                        <button type="button" id="add-placeholder" class="button"><?php _e('Add Placeholder', 'cik-smart-search'); ?></button>
+                                        <button type="button" id="add-placeholder" class="button"><?php esc_html_e('Add Placeholder', 'cik-smart-search'); ?></button>
                                     </div>
                                     <div>
                                         <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:6px;">EN</label>
                                         <div id="placeholders-en-container">
                                             <?php foreach ($search_placeholders_en as $index => $placeholder_text) : ?>
                                                 <div class="placeholder-en-row" style="margin-bottom:8px;">
-                                                    <input type="text" name="cik_search_placeholders_en[<?php echo $index; ?>]" value="<?php echo esc_attr($placeholder_text); ?>" placeholder="<?php _e('Placeholder text EN', 'cik-smart-search'); ?>" style="width:300px;">
+                                                    <input type="text" name="cik_search_placeholders_en[<?php echo absint($index); ?>]" value="<?php echo esc_attr($placeholder_text); ?>" placeholder="<?php esc_attr_e('Placeholder text EN', 'cik-smart-search'); ?>" style="width:300px;">
                                                     <button type="button" class="button remove-placeholder-en">&times;</button>
                                                 </div>
                                             <?php endforeach; ?>
                                         </div>
-                                        <button type="button" id="add-placeholder-en" class="button"><?php _e('Add Placeholder', 'cik-smart-search'); ?></button>
+                                        <button type="button" id="add-placeholder-en" class="button"><?php esc_html_e('Add Placeholder', 'cik-smart-search'); ?></button>
                                     </div>
                                 </div>
-                                <p class="description" style="margin-top:8px;"><?php _e('Add multiple placeholder texts that will animate in a typewriter loop effect', 'cik-smart-search'); ?></p>
+                                <p class="description" style="margin-top:8px;"><?php esc_html_e('Add multiple placeholder texts that will animate in a typewriter loop effect', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Tags Section Title', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Tags Section Title', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <div style="display:flex;gap:12px;flex-wrap:wrap;">
@@ -812,13 +849,13 @@ class Cik_Smart_Search {
                                         <input type="text" id="cik_search_title_en" name="cik_search_title_en" value="<?php echo esc_attr($search_title_en); ?>" class="regular-text">
                                     </div>
                                 </div>
-                                <p class="description"><?php _e('Title above the search tags', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Title above the search tags', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
 
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Search Results Title', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Search Results Title', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <div style="display:flex;gap:12px;flex-wrap:wrap;">
@@ -831,37 +868,37 @@ class Cik_Smart_Search {
                                         <input type="text" id="cik_search_results_title_en" name="cik_search_results_title_en" value="<?php echo esc_attr($search_results_title_en); ?>" class="regular-text">
                                     </div>
                                 </div>
-                                <p class="description"><?php _e('Title above the predictive search results (shown when typing 3+ characters)', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Title above the predictive search results (shown when typing 3+ characters)', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Search Tags', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Search Tags', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <div id="search-tags-container"> 
                                     <?php if (!empty($search_tags)) : ?>
                                         <div style="display:flex;gap:4px;margin-bottom:6px;font-size:11px;color:#666;font-weight:600;">
-                                            <span style="width:165px;"><?php _e('Label (GR)', 'cik-smart-search'); ?></span>
-                                            <span style="width:165px;"><?php _e('Search Term (GR)', 'cik-smart-search'); ?></span>
-                                            <span style="width:165px;"><?php _e('Label (EN)', 'cik-smart-search'); ?></span>
-                                            <span style="width:165px;"><?php _e('Search Term (EN)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php esc_html_e('Label (GR)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php esc_html_e('Search Term (GR)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php esc_html_e('Label (EN)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php esc_html_e('Search Term (EN)', 'cik-smart-search'); ?></span>
                                         </div>
                                         <?php foreach ($search_tags as $index => $tag) : ?>
                                             <div class="search-tag-row" style="margin-bottom: 10px; display:flex; gap:4px; align-items:center;">
-                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][label]" value="<?php echo esc_attr($tag['label']); ?>" placeholder="<?php _e('Label GR', 'cik-smart-search'); ?>" style="width: 160px;">
-                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][search_term]" value="<?php echo esc_attr($tag['search_term']); ?>" placeholder="<?php _e('Term GR', 'cik-smart-search'); ?>" style="width: 160px;">
-                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][label_en]" value="<?php echo esc_attr($tag['label_en'] ?? ''); ?>" placeholder="<?php _e('Label EN', 'cik-smart-search'); ?>" style="width: 160px;">
-                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][search_term_en]" value="<?php echo esc_attr($tag['search_term_en'] ?? ''); ?>" placeholder="<?php _e('Term EN', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo absint($index); ?>][label]" value="<?php echo esc_attr($tag['label']); ?>" placeholder="<?php esc_attr_e('Label GR', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo absint($index); ?>][search_term]" value="<?php echo esc_attr($tag['search_term']); ?>" placeholder="<?php esc_attr_e('Term GR', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo absint($index); ?>][label_en]" value="<?php echo esc_attr($tag['label_en'] ?? ''); ?>" placeholder="<?php esc_attr_e('Label EN', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo absint($index); ?>][search_term_en]" value="<?php echo esc_attr($tag['search_term_en'] ?? ''); ?>" placeholder="<?php esc_attr_e('Term EN', 'cik-smart-search'); ?>" style="width: 160px;">
                                                 <button type="button" class="button remove-tag">×</button>
                                             </div>
                                         <?php endforeach; ?>
                                     <?php endif;
                                     ?>
                                 </div>
-                                <button type="button" id="add-search-tag" class="button"><?php _e('Add Tag', 'cik-smart-search'); ?></button>
-                                <p class="description"><?php _e('Add search tags that will appear below the search box', 'cik-smart-search'); ?></p>
+                                <button type="button" id="add-search-tag" class="button"><?php esc_html_e('Add Tag', 'cik-smart-search'); ?></button>
+                                <p class="description"><?php esc_html_e('Add search tags that will appear below the search box', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                     </table>
@@ -872,128 +909,128 @@ class Cik_Smart_Search {
                     <table class="form-table">
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_enable_predictive"><?php _e('Enable Predictive Search', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_enable_predictive"><?php esc_html_e('Enable Predictive Search', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_enable_predictive" name="cik_search_enable_predictive" value="1" <?php checked($enable_predictive, 1); ?>>
-                                    <?php _e('Show live search suggestions as user types', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Show live search suggestions as user types', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_min_chars"><?php _e('Minimum Characters', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_min_chars"><?php esc_html_e('Minimum Characters', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_predictive_min_chars" name="cik_search_predictive_min_chars" value="<?php echo esc_attr($predictive_min_chars); ?>" min="1" max="10" style="width: 80px;">
-                                <p class="description"><?php _e('Start showing suggestions after X characters typed', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Start showing suggestions after X characters typed', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_delay"><?php _e('Search Delay (ms)', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_delay"><?php esc_html_e('Search Delay (ms)', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_predictive_delay" name="cik_search_predictive_delay" value="<?php echo esc_attr($predictive_delay); ?>" min="100" max="2000" step="100" style="width: 100px;">
-                                <p class="description"><?php _e('Delay before triggering search (prevents too many requests)', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Delay before triggering search (prevents too many requests)', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_max_results"><?php _e('Maximum Results', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_max_results"><?php esc_html_e('Maximum Results', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_predictive_max_results" name="cik_search_predictive_max_results" value="<?php echo esc_attr($predictive_max_results); ?>" min="1" max="20" style="width: 80px;">
-                                <p class="description"><?php _e('Number of suggestions to display', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Number of suggestions to display', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_show_images"><?php _e('Show Featured Images', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_show_images"><?php esc_html_e('Show Featured Images', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_predictive_show_images" name="cik_search_predictive_show_images" value="1" <?php checked($predictive_show_images, 1); ?>>
-                                    <?php _e('Display featured image thumbnails in suggestions', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Display featured image thumbnails in suggestions', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_show_excerpt"><?php _e('Show Excerpt', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_show_excerpt"><?php esc_html_e('Show Excerpt', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_predictive_show_excerpt" name="cik_search_predictive_show_excerpt" value="1" <?php checked($predictive_show_excerpt, 1); ?>>
-                                    <?php _e('Display post excerpt in suggestions', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Display post excerpt in suggestions', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_show_matched_content"><?php _e('Show Matched Content', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_show_matched_content"><?php esc_html_e('Show Matched Content', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_predictive_show_matched_content" name="cik_search_predictive_show_matched_content" value="1" <?php checked($predictive_show_matched_content, 1); ?>>
-                                    <?php _e('Display snippet with highlighted search terms', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Display snippet with highlighted search terms', 'cik-smart-search'); ?>
                                 </label>
-                                <p class="description"><?php _e('Shows where in the content the search term was found', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Shows where in the content the search term was found', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_show_match_location"><?php _e('Show Match Location', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_show_match_location"><?php esc_html_e('Show Match Location', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_predictive_show_match_location" name="cik_search_predictive_show_match_location" value="1" <?php checked($predictive_show_match_location, 1); ?>>
-                                    <?php _e('Display "Found in title" or "Found in content" label', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Display "Found in title" or "Found in content" label', 'cik-smart-search'); ?>
                                 </label>
-                                <p class="description"><?php _e('If unchecked, only shows the highlighted snippet without location label', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('If unchecked, only shows the highlighted snippet without location label', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_search_title_only"><?php _e('Search Title Only', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_search_title_only"><?php esc_html_e('Search Title Only', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_predictive_search_title_only" name="cik_search_predictive_search_title_only" value="1" <?php checked($search_title_only, 1); ?>>
-                                    <?php _e('Search only in post titles (faster but less comprehensive)', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Search only in post titles (faster but less comprehensive)', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_predictive_cache_duration"><?php _e('Cache Duration', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_predictive_cache_duration"><?php esc_html_e('Cache Duration', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_predictive_cache_duration" name="cik_search_predictive_cache_duration" value="<?php echo esc_attr($cache_duration); ?>" min="1" max="60" class="small-text">
-                                <?php _e('minutes', 'cik-smart-search'); ?>
-                                <p class="description"><?php _e('How long to cache search results (improves performance)', 'cik-smart-search'); ?></p>
+                                <?php esc_html_e('minutes', 'cik-smart-search'); ?>
+                                <p class="description"><?php esc_html_e('How long to cache search results (improves performance)', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label><?php _e('Clear Cache', 'cik-smart-search'); ?></label>
+                                <label><?php esc_html_e('Clear Cache', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <button type="submit" name="cik_search_clear_cache" class="button" onclick="return confirm('<?php esc_attr_e('Are you sure you want to clear the predictive search cache?', 'cik-smart-search'); ?>');">
-                                    <?php _e('Clear Predictive Search Cache', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Clear Predictive Search Cache', 'cik-smart-search'); ?>
                                 </button>
-                                <p class="description"><?php _e('Clear cached search results to see immediate changes', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Clear cached search results to see immediate changes', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                     </table>
@@ -1004,29 +1041,29 @@ class Cik_Smart_Search {
                     <table class="form-table">
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_voice_auto_submit"><?php _e('Auto Submit', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_voice_auto_submit"><?php esc_html_e('Auto Submit', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_voice_auto_submit" name="cik_search_voice_auto_submit" value="1" <?php checked($voice_auto_submit, 1); ?>>
-                                    <?php _e('Automatically submit the search form when voice input is complete', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Automatically submit the search form when voice input is complete', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_voice_listening_color"><?php _e('Listening Background Color', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_voice_listening_color"><?php esc_html_e('Listening Background Color', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="text" id="cik_search_voice_listening_color" name="cik_search_voice_listening_color" value="<?php echo esc_attr($voice_listening_color); ?>" class="color-picker">
-                                <p class="description"><?php _e('Background color of the microphone icon while listening', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Background color of the microphone icon while listening', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_voice_language"><?php _e('Voice Language', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_voice_language"><?php esc_html_e('Voice Language', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <select id="cik_search_voice_language" name="cik_search_voice_language">
@@ -1038,7 +1075,7 @@ class Cik_Smart_Search {
                                     <option value="es-ES" <?php selected($voice_language, 'es-ES'); ?>>Español (Spanish)</option>
                                     <option value="it-IT" <?php selected($voice_language, 'it-IT'); ?>>Italiano (Italian)</option>
                                 </select>
-                                <p class="description"><?php _e('Language for voice recognition', 'cik-smart-search'); ?></p>
+                                <p class="description"><?php esc_html_e('Language for voice recognition', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                     </table>
@@ -1049,36 +1086,36 @@ class Cik_Smart_Search {
                     <table class="form-table">
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_enable_analytics"><?php _e('Enable Search Analytics', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_enable_analytics"><?php esc_html_e('Enable Search Analytics', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_enable_analytics" name="cik_search_enable_analytics" value="1" <?php checked($enable_analytics, 1); ?>>
-                                    <?php _e('Track all search queries in the database. View analytics in "Analytics" menu.', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Track all search queries in the database. View analytics in "Analytics" menu.', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_log_ip"><?php _e('Log User IP', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_log_ip"><?php esc_html_e('Log User IP', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <label>
                                     <input type="checkbox" id="cik_search_log_ip" name="cik_search_log_ip" value="1" <?php checked($log_ip, 1); ?>>
-                                    <?php _e('Store user IP addresses for analytics (check GDPR compliance)', 'cik-smart-search'); ?>
+                                    <?php esc_html_e('Store user IP addresses for analytics (check GDPR compliance)', 'cik-smart-search'); ?>
                                 </label>
                             </td>
                         </tr>
                         
                         <tr>
                             <th scope="row">
-                                <label for="cik_search_analytics_retention"><?php _e('Data Retention', 'cik-smart-search'); ?></label>
+                                <label for="cik_search_analytics_retention"><?php esc_html_e('Data Retention', 'cik-smart-search'); ?></label>
                             </th>
                             <td>
                                 <input type="number" id="cik_search_analytics_retention" name="cik_search_analytics_retention" value="<?php echo esc_attr($analytics_retention); ?>" min="0" max="365" style="width: 80px;">
-                                <?php _e('days', 'cik-smart-search'); ?>
-                                <p class="description"><?php _e('Delete search logs older than X days (0 = keep forever)', 'cik-smart-search'); ?></p>
+                                <?php esc_html_e('days', 'cik-smart-search'); ?>
+                                <p class="description"><?php esc_html_e('Delete search logs older than X days (0 = keep forever)', 'cik-smart-search'); ?></p>
                             </td>
                         </tr>
                     </table>
@@ -1113,7 +1150,7 @@ class Cik_Smart_Search {
             var placeholderIndex = <?php echo count($search_placeholders); ?>;
             $('#add-placeholder').on('click', function() {
                 var html = '<div class="placeholder-row" style="margin-bottom:8px;">' +
-                    '<input type="text" name="cik_search_placeholders[' + placeholderIndex + ']" placeholder="<?php _e('Placeholder text', 'cik-smart-search'); ?>" style="width:300px;">' +
+                    '<input type="text" name="cik_search_placeholders[' + placeholderIndex + ']" placeholder="<?php esc_attr_e('Placeholder text', 'cik-smart-search'); ?>" style="width:300px;">' +
                     '<button type="button" class="button remove-placeholder">&times;</button>' +
                     '</div>';
                 $('#placeholders-container').append(html);
@@ -1128,7 +1165,7 @@ class Cik_Smart_Search {
             var placeholderEnIndex = <?php echo count($search_placeholders_en); ?>;
             $('#add-placeholder-en').on('click', function() {
                 var html = '<div class="placeholder-en-row" style="margin-bottom:8px;">' +
-                    '<input type="text" name="cik_search_placeholders_en[' + placeholderEnIndex + ']" placeholder="<?php _e('Placeholder text EN', 'cik-smart-search'); ?>" style="width:300px;">' +
+                    '<input type="text" name="cik_search_placeholders_en[' + placeholderEnIndex + ']" placeholder="<?php esc_attr_e('Placeholder text EN', 'cik-smart-search'); ?>" style="width:300px;">' +
                     '<button type="button" class="button remove-placeholder-en">&times;</button>' +
                     '</div>';
                 $('#placeholders-en-container').append(html);
@@ -1143,10 +1180,10 @@ class Cik_Smart_Search {
             var tagIndex = <?php echo count($search_tags); ?>;
             $('#add-search-tag').on('click', function() {
                 var html = '<div class="search-tag-row" style="margin-bottom: 10px; display:flex; gap:4px; align-items:center;">' +
-                    '<input type="text" name="cik_search_tags[' + tagIndex + '][label]" placeholder="<?php _e('Label GR', 'cik-smart-search'); ?>" style="width: 160px;">' +
-                    '<input type="text" name="cik_search_tags[' + tagIndex + '][search_term]" placeholder="<?php _e('Term GR', 'cik-smart-search'); ?>" style="width: 160px;">' +
-                    '<input type="text" name="cik_search_tags[' + tagIndex + '][label_en]" placeholder="<?php _e('Label EN', 'cik-smart-search'); ?>" style="width: 160px;">' +
-                    '<input type="text" name="cik_search_tags[' + tagIndex + '][search_term_en]" placeholder="<?php _e('Term EN', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][label]" placeholder="<?php esc_attr_e('Label GR', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][search_term]" placeholder="<?php esc_attr_e('Term GR', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][label_en]" placeholder="<?php esc_attr_e('Label EN', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][search_term_en]" placeholder="<?php esc_attr_e('Term EN', 'cik-smart-search'); ?>" style="width: 160px;">' +
                     '<button type="button" class="button remove-tag">×</button>' +
                     '</div>';
                 $('#search-tags-container').append(html);
@@ -1226,8 +1263,8 @@ class Cik_Smart_Search {
      * Add settings link to plugins page
      */
     public function add_settings_link($links) {
-        $settings_link = '<a href="' . admin_url('admin.php?page=cik-smart-search') . '">' . __('Settings', 'cik-smart-search') . '</a>';
-        $analytics_link = '<a href="' . admin_url('edit.php?post_type=cik_search_log') . '" style="color:#2271b1;font-weight:600;">' . __('Analytics', 'cik-smart-search') . '</a>';
+        $settings_link  = '<a href="' . esc_url(admin_url('admin.php?page=cik-smart-search')) . '">' . esc_html__('Settings', 'cik-smart-search') . '</a>';
+        $analytics_link = '<a href="' . esc_url(admin_url('edit.php?post_type=cik_search_log')) . '" style="color:#2271b1;font-weight:600;">' . esc_html__('Analytics', 'cik-smart-search') . '</a>';
         array_unshift($links, $analytics_link, $settings_link);
         return $links;
     }
@@ -1239,10 +1276,13 @@ class Cik_Smart_Search {
         // Verify nonce
         check_ajax_referer('cik_search_predictive_search', 'nonce');
         
-        $query = isset($_GET['query']) ? sanitize_text_field($_GET['query']) : '';
-        
-        if (empty($query)) {
-            wp_send_json_error('Empty query');
+        // Public, read-only endpoint: validate and bound the input instead of
+        // trusting it. Queries are trimmed and capped at 100 characters.
+        $query = isset($_GET['query']) ? sanitize_text_field(wp_unslash($_GET['query'])) : '';
+        $query = trim(mb_substr($query, 0, 100, 'UTF-8'));
+
+        if ($query === '') {
+            wp_send_json_error(array('message' => 'Empty query'), 400);
         }
         
         // Get settings
@@ -2214,8 +2254,18 @@ class Cik_Smart_Search {
             'show_ui'               => true,
             'show_in_menu'          => false, // We add it manually via submenu
             'capability_type'       => 'post',
+            // Logs may contain (anonymized) IPs, so only administrators can
+            // view or delete them; nobody can create them from the admin.
             'capabilities'          => array(
-                'create_posts' => false, // Disable manual creation
+                'create_posts'           => 'do_not_allow',
+                'edit_posts'             => 'manage_options',
+                'edit_others_posts'      => 'manage_options',
+                'edit_published_posts'   => 'manage_options',
+                'publish_posts'          => 'manage_options',
+                'delete_posts'           => 'manage_options',
+                'delete_others_posts'    => 'manage_options',
+                'delete_published_posts' => 'manage_options',
+                'read_private_posts'     => 'manage_options',
             ),
             'map_meta_cap'          => true,
             'supports'              => array('title'),
@@ -2313,10 +2363,13 @@ class Cik_Smart_Search {
         
         $already_logging = true; // Set flag to prevent recursion
         
-        $search_term = $query->get('s');
+        $search_term = trim(sanitize_text_field(wp_unslash((string) $query->get('s'))));
+
+        // Cap the stored term: searches come from anonymous visitors.
+        $search_term = mb_substr($search_term, 0, 100, 'UTF-8');
 
         // Skip empty searches
-        if (empty($search_term)) {
+        if ($search_term === '') {
             $already_logging = false;
             return;
         }
@@ -2365,13 +2418,13 @@ class Cik_Smart_Search {
             // Create new search log post
             $post_id = wp_insert_post(array(
                 'post_type'   => 'cik_search_log',
-                'post_title'  => sanitize_text_field($search_term),
+                'post_title'  => $search_term,
                 'post_status' => 'publish',
                 'post_author' => 0,
             ));
 
             if ($post_id && !is_wp_error($post_id)) {
-                update_post_meta($post_id, '_search_term',            sanitize_text_field($search_term));
+                update_post_meta($post_id, '_search_term',            $search_term);
                 update_post_meta($post_id, '_search_term_normalized',  $normalized);
                 update_post_meta($post_id, '_search_time',             current_time('timestamp'));
                 update_post_meta($post_id, '_last_search_time',        current_time('timestamp'));
@@ -2381,8 +2434,9 @@ class Cik_Smart_Search {
                     update_post_meta($post_id, '_user_ip', $this->get_user_ip());
                 }
 
-                update_post_meta($post_id, '_user_agent', sanitize_text_field($_SERVER['HTTP_USER_AGENT'] ?? ''));
-                update_post_meta($post_id, '_referer',    sanitize_text_field(wp_get_referer() ?? ''));
+                // Store only the referring path, without the query string (may contain personal data).
+                $referer = wp_get_referer();
+                update_post_meta($post_id, '_referer', $referer ? esc_url_raw(strtok($referer, '?')) : '');
             }
         }
         
@@ -2423,20 +2477,24 @@ class Cik_Smart_Search {
     }
 
     /**
-     * Get user IP address (safely)
+     * Anonymized IP address of the visitor (only used when "Log User IP" is enabled).
+     *
+     * Only REMOTE_ADDR is trusted: X-Forwarded-For / Client-IP headers are set by
+     * the client and can be spoofed. Sites behind a reverse proxy can supply the
+     * real address through the `cik_search_client_ip` filter. The address is
+     * stored anonymized (last octet / last 80 bits zeroed) to limit personal data.
+     *
+     * @return string
      */
     private function get_user_ip() {
-        $ip = '';
-        
-        if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
-            $ip = $_SERVER['HTTP_CLIENT_IP'];
-        } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
-        } else {
-            $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+        $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
+        $ip = (string) apply_filters('cik_search_client_ip', $ip);
+
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+            return '';
         }
-        
-        return sanitize_text_field($ip);
+
+        return wp_privacy_anonymize_ip($ip);
     }
     
     /**
