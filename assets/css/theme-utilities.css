@@ -3,7 +3,7 @@
  *
  * Standalone, Tailwind-free styles for the search box template and the
  * predictive result markup injected by assets/js/predictive-search.js.
- * All rules are scoped to .cik-search-wrapper so they never leak into
+ * All selectors use the .cik-search- prefix so they do not clash with
  * the surrounding theme.
  */
 

@@ -1,9 +1,10 @@
 /**
  * Smart Search Box Styles
- * 
- * This provides minimal styling. 
- * Most styling comes from Tailwind classes in the template.
- * Override these variables in your theme to customize colors.
+ *
+ * Base styles: resets, mobile layout and print rules.
+ * Component styles (box, results, voice button) are in theme-utilities.css.
+ * The variables below are declared for theming but not used by the
+ * component styles yet.
  */
 
 :root {
@@ -116,11 +117,6 @@
 
 /* 
  * Override Examples (add to your theme's style.css):
- * 
- * :root {
- *     --cik-search-primary: #your-color;
- *     --cik-search-primary-hover: #your-hover-color;
- * }
  * 
  * .cik-search-wrapper {
  *     max-width: 1200px;

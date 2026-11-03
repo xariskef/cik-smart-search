@@ -1313,7 +1313,7 @@ class Cik_Smart_Search {
 
         // Greeklish conversion is intentionally not applied to the post query:
         // it caused false positives (e.g. "Oil" -> "οιλ"). It is only used for
-        // highlighting and taxonomy matching.
+        // highlighting and for ordering title matches first.
         $args = array(
             's'                      => $query,
             'post_type'              => $post_types,
