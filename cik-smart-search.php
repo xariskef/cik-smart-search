@@ -1,0 +1,2538 @@
+<?php
+/**
+ * Plugin Name: Smart Search
+ * Description: Predictive search box with voice input, suggested keywords and search analytics.
+ * Version: 2.8.0
+ * Author: Cikefallinos
+ * Author URI: https://cikefallinos.com
+ * Text Domain: cik-smart-search
+ * License: All rights reserved
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ */
+
+// Exit if accessed directly
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Plugin constants
+define('CIK_SEARCH_VERSION', '2.8.0');
+define('CIK_SEARCH_PATH', plugin_dir_path(__FILE__));
+define('CIK_SEARCH_URL', plugin_dir_url(__FILE__));
+
+/**
+ * Main plugin class
+ */
+class Cik_Smart_Search {
+    
+    /**
+     * Instance
+     */
+    private static $instance = null;
+    
+    /**
+     * Cached analytics settings to prevent infinite loops
+     */
+    private $analytics_settings_cache = null;
+    
+    /**
+     * Get Instance
+     */
+    public static function get_instance() {
+        if (null === self::$instance) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+    
+    /**
+     * Constructor
+     */
+    private function __construct() {
+        $this->init_hooks();
+    }
+    
+    /**
+     * Get analytics settings (cached to prevent infinite loops)
+     */
+    private function get_analytics_settings() {
+        if ($this->analytics_settings_cache === null) {
+            $this->analytics_settings_cache = array(
+                'enabled' => get_option('cik_search_enable_analytics', 1),
+                'log_ip' => get_option('cik_search_log_ip', 0),
+                'retention' => get_option('cik_search_analytics_retention', 90),
+            );
+        }
+        return $this->analytics_settings_cache;
+    }
+    
+    /**
+     * Initialize hooks
+     */
+    private function init_hooks() {
+        // Enqueue assets
+        add_action('wp_enqueue_scripts', array($this, 'enqueue_assets'));
+        
+        // Register shortcode
+        add_shortcode('cik_search', array($this, 'render_search_box'));
+        
+        // Admin menu
+        add_action('admin_menu', array($this, 'register_admin_menu'));
+        
+        // Register settings
+        add_action('admin_init', array($this, 'register_settings'));
+        
+        // Add settings link
+        add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_settings_link'));
+        
+        // Predictive Search AJAX
+        add_action('wp_ajax_cik_search_predictive_search', array($this, 'ajax_predictive_search'));
+        add_action('wp_ajax_nopriv_cik_search_predictive_search', array($this, 'ajax_predictive_search'));
+        
+        // Suggested Keywords AJAX
+        add_action('wp_ajax_cik_search_get_suggestions', array($this, 'ajax_get_suggestions'));
+        add_action('wp_ajax_nopriv_cik_search_get_suggestions', array($this, 'ajax_get_suggestions'));
+        
+        // Clear predictive search cache when posts are updated
+        add_action('save_post', array($this, 'clear_predictive_cache'));
+        add_action('delete_post', array($this, 'clear_predictive_cache'));
+        
+        // Search Analytics
+        add_action('init', array($this, 'register_search_log_post_type'));
+        add_action('pre_get_posts', array($this, 'log_search_query'));
+        add_filter('manage_cik_search_log_posts_columns', array($this, 'search_log_columns'));
+        add_action('manage_cik_search_log_posts_custom_column', array($this, 'search_log_column_content'), 10, 2);
+        add_filter('manage_edit-cik_search_log_sortable_columns', array($this, 'search_log_sortable_columns'));
+        add_action('pre_get_posts', array($this, 'search_log_orderby'));
+        
+        // Data retention cron
+        add_action('cik_search_cleanup', array($this, 'cleanup_old_logs'));
+        if (!wp_next_scheduled('cik_search_cleanup')) {
+            wp_schedule_event(time(), 'daily', 'cik_search_cleanup');
+        }
+        
+        // Admin styles
+        add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_assets'));
+    }
+    
+    /**
+     * Enqueue plugin assets
+     */
+    public function enqueue_assets() {
+        // Enqueue CSS
+        wp_enqueue_style(
+            'cik-smart-search',
+            CIK_SEARCH_URL . 'assets/css/search-box.css',
+            array(),
+            CIK_SEARCH_VERSION
+        );
+
+        // Component styles (Tailwind-free). Provides all layout/visual rules
+        // for the template and the JS-injected predictive markup, so the
+        // plugin no longer depends on the theme's Tailwind build.
+        wp_enqueue_style(
+            'cik-search-theme-utilities',
+            CIK_SEARCH_URL . 'assets/css/theme-utilities.css',
+            array('cik-smart-search'),
+            CIK_SEARCH_VERSION
+        );
+
+        // Voice Search JS - Web Speech API (Chrome, Edge, Safari)
+        wp_enqueue_script(
+            'cik-search-voice',
+            CIK_SEARCH_URL . 'assets/js/voice-search.js',
+            array(),
+            CIK_SEARCH_VERSION,
+            true
+        );
+        
+        // Pass voice search settings to JavaScript
+        $voice_settings = array(
+            'autoSubmit' => (bool) get_option('cik_search_voice_auto_submit', 0),
+            'listeningBgColor' => get_option('cik_search_voice_listening_color', '#22c55e'),
+            'language' => get_option('cik_search_voice_language', 'el-GR'),
+        );
+        
+        wp_localize_script(
+            'cik-search-voice',
+            'cikSearchVoice',
+            $voice_settings
+        );
+        
+        // Placeholder Animation
+        wp_enqueue_script(
+            'cik-search-placeholder',
+            CIK_SEARCH_URL . 'assets/js/placeholder-animation.js',
+            array(),
+            CIK_SEARCH_VERSION,
+            true
+        );
+        
+        // Get placeholder texts — pick EN if current language is English
+        $current_lang = apply_filters('wpml_current_language', null);
+        if ($current_lang === 'en') {
+            $placeholders = get_option('cik_search_placeholders_en', array());
+            if (empty($placeholders)) {
+                $single = get_option('cik_search_placeholder_en', '');
+                if (empty($single)) $single = get_option('cik_search_placeholder', 'Search...');
+                $placeholders = array($single);
+            }
+        } else {
+            $placeholders = get_option('cik_search_placeholders', array());
+            if (empty($placeholders)) {
+                $single = get_option('cik_search_placeholder', 'Search...');
+                $placeholders = array($single);
+            }
+        }
+        
+        wp_localize_script(
+            'cik-search-placeholder',
+            'cikSearchPlaceholders',
+            $placeholders
+        );
+        
+        // Predictive Search & Suggested Keywords
+        // Always load JS/CSS for suggested keywords, even if predictive search is disabled
+        wp_enqueue_style(
+            'cik-search-predictive',
+            CIK_SEARCH_URL . 'assets/css/predictive-search.css',
+            array(),
+            CIK_SEARCH_VERSION
+        );
+
+         wp_enqueue_script(
+            'cik-search-predictive',
+            CIK_SEARCH_URL . 'assets/js/predictive-search.js',
+            array(),
+            CIK_SEARCH_VERSION,
+            true
+        );
+        
+        wp_enqueue_script(
+            'cik-search-predictive',
+            CIK_SEARCH_URL . 'assets/js/predictive-search.js',
+            array(),
+            CIK_SEARCH_VERSION,
+            true
+        );
+        
+        // Prepare keywords and popular searches for frontend
+        $keywords_data = array(
+            'manual' => array(),
+            'popular' => array()
+        );
+        
+        // Get keywords source setting
+        $keywords_source = get_option('cik_search_keywords_source', 'mixed');
+        $total_limit = intval(get_option('cik_search_suggested_keywords_limit', 30));
+        
+        // Get popular searches first (they have count data for ordering)
+        $show_popular = get_option('cik_search_show_popular_searches', 1);
+        $enable_analytics = get_option('cik_search_enable_analytics', 1);
+        $popular_texts = array(); // track for deduplication
+        
+        if ($show_popular && $enable_analytics) {
+            $pop_limit = get_option('cik_search_popular_searches_limit', 5);
+            $popular_searches = $this->get_popular_searches($pop_limit);
+            
+            foreach ($popular_searches as $search) {
+                $keywords_data['popular'][] = array(
+                    'text' => $search['query'],
+                    'count' => $search['count'],
+                    'results' => isset($search['results']) ? $search['results'] : 0,
+                    'type' => 'popular'
+                );
+                $popular_texts[] = mb_strtolower($search['query'], 'UTF-8');
+            }
+        }
+        
+        // Get manual keywords (exclude duplicates already in popular)
+        if ($keywords_source !== 'popular_only') {
+            $manual_keywords = get_option('cik_search_suggested_keywords', array());
+            if (!empty($manual_keywords)) {
+                foreach ($manual_keywords as $keyword) {
+                    if (!in_array(mb_strtolower($keyword, 'UTF-8'), $popular_texts)) {
+                        $keywords_data['manual'][] = array(
+                            'text' => $keyword,
+                            'type' => 'manual'
+                        );
+                    }
+                }
+            }
+        }
+        
+        // Apply total limit: popular first, then manual
+        if ($total_limit > 0) {
+            $pop_count = count($keywords_data['popular']);
+            if ($pop_count >= $total_limit) {
+                $keywords_data['popular'] = array_slice($keywords_data['popular'], 0, $total_limit);
+                $keywords_data['manual'] = array();
+            } else {
+                $remaining = $total_limit - $pop_count;
+                $keywords_data['manual'] = array_slice($keywords_data['manual'], 0, $remaining);
+            }
+        }
+        
+        // Build type labels map: post_type/taxonomy slug => translated singular label
+        // Built at page-load time so WPML language is already set correctly.
+        $type_labels = array();
+        $active_post_types = get_option('cik_search_predictive_post_types', array('post', 'page'));
+        foreach ($active_post_types as $pt) {
+            $pto = get_post_type_object($pt);
+            if ($pto) {
+                $type_labels[$pt] = $pto->labels->singular_name;
+            }
+        }
+        $active_taxonomies = get_option('cik_search_predictive_taxonomies', array());
+        foreach ($active_taxonomies as $tax) {
+            $tax_obj = get_taxonomy($tax);
+            if ($tax_obj) {
+                $type_labels[$tax] = $tax_obj->labels->singular_name;
+            }
+        }
+
+        $predictive_settings = array(
+            'ajaxUrl' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('cik_search_predictive_search'),
+            'enabled' => (bool) get_option('cik_search_enable_predictive', 1),
+            'minChars' => get_option('cik_search_predictive_min_chars', 3),
+            'delay' => get_option('cik_search_predictive_delay', 300),
+            'maxResults' => get_option('cik_search_predictive_max_results', 5),
+            'postTypes' => get_option('cik_search_predictive_post_types', array('post', 'page')),
+            'keywordsSource' => get_option('cik_search_keywords_source', 'mixed'),
+            'preloadedKeywords' => $keywords_data, // All keywords/popular searches preloaded
+            'maxDisplayKeywords' => intval(get_option('cik_search_keywords_display_limit', 30)), // Display limit
+            'typeLabels' => $type_labels, // Translated labels per post type / taxonomy
+            'i18n' => array(
+                'searching'   => __( 'Search...', 'cik-smart-search' ),
+            ),
+        );
+        
+        wp_localize_script(
+            'cik-search-predictive',
+            'cikSearchPredictive',
+            $predictive_settings
+        );
+    }
+    
+    /**
+     * Enqueue admin assets
+     */
+    public function enqueue_admin_assets($hook) {
+        // Only load on our plugin pages
+        if (strpos($hook, 'cik-smart-search') === false) {
+            return;
+        }
+        
+        // Color picker
+        wp_enqueue_style('wp-color-picker');
+        wp_enqueue_script('wp-color-picker');
+        
+        // Admin scripts
+        wp_add_inline_script('wp-color-picker', 'jQuery(document).ready(function($) { $(".color-picker").wpColorPicker(); });');
+    }
+    
+    /**
+     * Register admin menu
+     */
+    public function register_admin_menu() {
+        // Main menu
+        add_menu_page(
+            __('Smart Search', 'cik-smart-search'),
+            __('Smart Search', 'cik-smart-search'),
+            'manage_options',
+            'cik-smart-search',
+            array($this, 'render_settings_page'),
+            'dashicons-search',
+            60
+        );
+        
+        // Settings submenu (same as parent)
+        add_submenu_page(
+            'cik-smart-search',
+            __('Settings', 'cik-smart-search'),
+            __('Settings', 'cik-smart-search'),
+            'manage_options',
+            'cik-smart-search',
+            array($this, 'render_settings_page')
+        );
+        
+        // Analytics submenu
+        add_submenu_page(
+            'cik-smart-search',
+            __('Search Analytics', 'cik-smart-search'),
+            __('Analytics', 'cik-smart-search'),
+            'manage_options',
+            'edit.php?post_type=cik_search_log'
+        );
+    }
+    
+    /**
+     * Register settings
+     */
+    public function register_settings() {
+        // Search Box Settings
+        register_setting('cik_search_settings', 'cik_search_placeholder');
+        register_setting('cik_search_settings', 'cik_search_placeholder_en');
+        register_setting('cik_search_settings', 'cik_search_placeholders');
+        register_setting('cik_search_settings', 'cik_search_placeholders_en');
+        register_setting('cik_search_settings', 'cik_search_title');
+        register_setting('cik_search_settings', 'cik_search_title_en');
+        register_setting('cik_search_settings', 'cik_search_results_title_en');
+        register_setting('cik_search_settings', 'cik_search_tags');
+        
+        // Predictive Search Settings
+        register_setting('cik_search_settings', 'cik_search_enable_predictive');
+        register_setting('cik_search_settings', 'cik_search_predictive_min_chars');
+        register_setting('cik_search_settings', 'cik_search_predictive_delay');
+        register_setting('cik_search_settings', 'cik_search_predictive_max_results');
+        register_setting('cik_search_settings', 'cik_search_predictive_post_types');
+        register_setting('cik_search_settings', 'cik_search_predictive_show_images');
+        register_setting('cik_search_settings', 'cik_search_predictive_show_excerpt');
+        register_setting('cik_search_settings', 'cik_search_predictive_search_title_only');
+        register_setting('cik_search_settings', 'cik_search_predictive_cache_duration');
+        
+        // Voice Search Settings
+        register_setting('cik_search_settings', 'cik_search_voice_auto_submit');
+        register_setting('cik_search_settings', 'cik_search_voice_listening_color');
+        register_setting('cik_search_settings', 'cik_search_voice_language');
+        
+        // Analytics Settings
+        register_setting('cik_search_settings', 'cik_search_enable_analytics');
+        register_setting('cik_search_settings', 'cik_search_log_ip');
+        register_setting('cik_search_settings', 'cik_search_analytics_retention');
+    }
+    
+    /**
+     * Render settings page
+     */
+    public function render_settings_page() {
+        // Check user capabilities
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        // Clear cache manually
+        if (isset($_POST['cik_search_clear_cache'])) {
+            check_admin_referer('cik_search_settings');
+            $this->clear_predictive_cache();
+            echo '<div class="updated"><p>' . __('Cache cleared successfully!', 'cik-smart-search') . '</p></div>';
+        }
+        
+        // Save settings
+        if (isset($_POST['cik_search_save'])) {
+            check_admin_referer('cik_search_settings');
+            
+            // Save search box settings
+            update_option('cik_search_placeholder', sanitize_text_field($_POST['cik_search_placeholder'] ?? ''));
+            update_option('cik_search_placeholder_en', sanitize_text_field($_POST['cik_search_placeholder_en'] ?? ''));
+            update_option('cik_search_title', sanitize_text_field($_POST['cik_search_title'] ?? ''));
+            update_option('cik_search_title_en', sanitize_text_field($_POST['cik_search_title_en'] ?? ''));
+            update_option('cik_search_results_title', sanitize_text_field($_POST['cik_search_results_title'] ?? 'Search Results'));
+            update_option('cik_search_results_title_en', sanitize_text_field($_POST['cik_search_results_title_en'] ?? ''));
+
+            // Save animated placeholders (GR)
+            $placeholders = array();
+            if (isset($_POST['cik_search_placeholders']) && is_array($_POST['cik_search_placeholders'])) {
+                foreach ($_POST['cik_search_placeholders'] as $text) {
+                    $text = sanitize_text_field($text);
+                    if (!empty($text)) {
+                        $placeholders[] = $text;
+                    }
+                }
+            }
+            update_option('cik_search_placeholders', $placeholders);
+
+            // Save animated placeholders (EN)
+            $placeholders_en = array();
+            if (isset($_POST['cik_search_placeholders_en']) && is_array($_POST['cik_search_placeholders_en'])) {
+                foreach ($_POST['cik_search_placeholders_en'] as $text) {
+                    $text = sanitize_text_field($text);
+                    if (!empty($text)) {
+                        $placeholders_en[] = $text;
+                    }
+                }
+            }
+            update_option('cik_search_placeholders_en', $placeholders_en);
+            
+            // Save tags
+            $tags = array();
+            if (isset($_POST['cik_search_tags']) && is_array($_POST['cik_search_tags'])) {
+                foreach ($_POST['cik_search_tags'] as $tag) {
+                    if (!empty($tag['label']) && !empty($tag['search_term'])) {
+                        $tags[] = array(
+                            'label'          => sanitize_text_field($tag['label']),
+                            'search_term'    => sanitize_text_field($tag['search_term']),
+                            'label_en'       => sanitize_text_field($tag['label_en'] ?? ''),
+                            'search_term_en' => sanitize_text_field($tag['search_term_en'] ?? ''),
+                        );
+                    }
+                }
+            }
+            update_option('cik_search_tags', $tags);
+            
+            // Predictive search settings
+            update_option('cik_search_enable_predictive', isset($_POST['cik_search_enable_predictive']) ? 1 : 0);
+            update_option('cik_search_predictive_min_chars', intval($_POST['cik_search_predictive_min_chars'] ?? 3));
+            update_option('cik_search_predictive_delay', intval($_POST['cik_search_predictive_delay'] ?? 300));
+            update_option('cik_search_predictive_max_results', intval($_POST['cik_search_predictive_max_results'] ?? 5));
+            update_option('cik_search_predictive_post_types', $_POST['cik_search_predictive_post_types'] ?? array('post', 'page'));
+            update_option('cik_search_predictive_taxonomies', $_POST['cik_search_predictive_taxonomies'] ?? array());
+            update_option('cik_search_prioritize_title_matches', isset($_POST['cik_search_prioritize_title_matches']) ? 1 : 0);
+            
+            // Save suggested keywords
+            $suggested_keywords = array();
+            if (isset($_POST['cik_search_suggested_keywords']) && is_array($_POST['cik_search_suggested_keywords'])) {
+                foreach ($_POST['cik_search_suggested_keywords'] as $keyword) {
+                    $keyword = sanitize_text_field($keyword);
+                    if (!empty($keyword)) {
+                        $suggested_keywords[] = $keyword;
+                    }
+                }
+            }
+            update_option('cik_search_suggested_keywords', $suggested_keywords);
+            
+            // Clear wp_cache when keywords are updated
+            wp_cache_delete('cik_search_manual_keywords');
+            
+            update_option('cik_search_show_popular_searches', isset($_POST['cik_search_show_popular_searches']) ? 1 : 0);
+            update_option('cik_search_popular_searches_limit', intval($_POST['cik_search_popular_searches_limit'] ?? 5));
+            update_option('cik_search_suggested_keywords_limit', intval($_POST['cik_search_suggested_keywords_limit'] ?? 30));
+            update_option('cik_search_keywords_display_limit', intval($_POST['cik_search_keywords_display_limit'] ?? 30));
+            update_option('cik_search_keywords_source', sanitize_text_field($_POST['cik_search_keywords_source'] ?? 'mixed'));
+            
+            update_option('cik_search_predictive_show_images', isset($_POST['cik_search_predictive_show_images']) ? 1 : 0);
+            update_option('cik_search_predictive_show_excerpt', isset($_POST['cik_search_predictive_show_excerpt']) ? 1 : 0);
+            update_option('cik_search_predictive_show_matched_content', isset($_POST['cik_search_predictive_show_matched_content']) ? 1 : 0);
+            update_option('cik_search_predictive_show_match_location', isset($_POST['cik_search_predictive_show_match_location']) ? 1 : 0);
+            update_option('cik_search_predictive_search_title_only', isset($_POST['cik_search_predictive_search_title_only']) ? 1 : 0);
+            update_option('cik_search_predictive_cache_duration', intval($_POST['cik_search_predictive_cache_duration'] ?? 5));
+            
+            // Voice settings
+            update_option('cik_search_voice_auto_submit', isset($_POST['cik_search_voice_auto_submit']) ? 1 : 0);
+            update_option('cik_search_voice_listening_color', sanitize_hex_color($_POST['cik_search_voice_listening_color'] ?? '#22c55e'));
+            update_option('cik_search_voice_language', sanitize_text_field($_POST['cik_search_voice_language'] ?? 'el-GR'));
+            
+            // Analytics settings
+            update_option('cik_search_enable_analytics', isset($_POST['cik_search_enable_analytics']) ? 1 : 0);
+            update_option('cik_search_log_ip', isset($_POST['cik_search_log_ip']) ? 1 : 0);
+            update_option('cik_search_analytics_retention', intval($_POST['cik_search_analytics_retention'] ?? 90));
+            
+            // Clear predictive search cache after settings change
+            $this->clear_predictive_cache();
+            
+            echo '<div class="updated"><p>' . __('Settings saved successfully!', 'cik-smart-search') . '</p></div>';
+        }
+        
+        // Get current values
+        $search_placeholder = get_option('cik_search_placeholder', 'Search...');
+        $search_placeholder_en = get_option('cik_search_placeholder_en', '');
+        $search_placeholders = get_option('cik_search_placeholders', array());
+        $search_placeholders_en = get_option('cik_search_placeholders_en', array());
+        $search_title = get_option('cik_search_title', 'May interest you');
+        $search_title_en = get_option('cik_search_title_en', '');
+        $search_results_title = get_option('cik_search_results_title', 'Search Results');
+        $search_results_title_en = get_option('cik_search_results_title_en', '');
+        $search_tags = get_option('cik_search_tags', array());
+        $enable_predictive = get_option('cik_search_enable_predictive', 1);
+        $predictive_min_chars = get_option('cik_search_predictive_min_chars', 3);
+        $predictive_delay = get_option('cik_search_predictive_delay', 300);
+        $predictive_max_results = get_option('cik_search_predictive_max_results', 5);
+        $predictive_post_types = get_option('cik_search_predictive_post_types', array('post', 'page'));
+        $predictive_taxonomies = get_option('cik_search_predictive_taxonomies', array());
+        $prioritize_title_matches = get_option('cik_search_prioritize_title_matches', 0);
+        $suggested_keywords = get_option('cik_search_suggested_keywords', array());
+        $show_popular_searches = get_option('cik_search_show_popular_searches', 1);
+        $popular_searches_limit = get_option('cik_search_popular_searches_limit', 5);
+        $suggested_keywords_limit = get_option('cik_search_suggested_keywords_limit', 30);
+        $keywords_display_limit = get_option('cik_search_keywords_display_limit', 30);
+        $keywords_source = get_option('cik_search_keywords_source', 'mixed');
+        $predictive_show_images = get_option('cik_search_predictive_show_images', 1);
+        $predictive_show_excerpt = get_option('cik_search_predictive_show_excerpt', 1);
+        $predictive_show_matched_content = get_option('cik_search_predictive_show_matched_content', 1);
+        $predictive_show_match_location = get_option('cik_search_predictive_show_match_location', 1);
+        $search_title_only = get_option('cik_search_predictive_search_title_only', 0);
+        $cache_duration = get_option('cik_search_predictive_cache_duration', 5);
+        $voice_auto_submit = get_option('cik_search_voice_auto_submit', 0);
+        $voice_listening_color = get_option('cik_search_voice_listening_color', '#22c55e');
+        $voice_language = get_option('cik_search_voice_language', 'el-GR');
+        $enable_analytics = get_option('cik_search_enable_analytics', 1);
+        $log_ip = get_option('cik_search_log_ip', 0);
+        $analytics_retention = get_option('cik_search_analytics_retention', 90);
+        
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            
+            <form method="post" action="">
+                <?php wp_nonce_field('cik_search_settings'); ?>
+                
+                <h2 class="nav-tab-wrapper">
+                    <a href="#tab-general" class="nav-tab nav-tab-active"><?php _e('General', 'cik-smart-search'); ?></a>
+                    <a href="#tab-search-box" class="nav-tab"><?php _e('Search Box', 'cik-smart-search'); ?></a>
+                    <a href="#tab-predictive" class="nav-tab"><?php _e('Predictive Search', 'cik-smart-search'); ?></a>
+                    <a href="#tab-voice" class="nav-tab"><?php _e('Voice Search', 'cik-smart-search'); ?></a>
+                    <a href="#tab-analytics" class="nav-tab"><?php _e('Analytics', 'cik-smart-search'); ?></a>
+                </h2>
+                
+                <!-- Tab 1: General -->
+                <div id="tab-general" class="tab-content">
+                    <h3><?php _e('Search Content Settings', 'cik-smart-search'); ?></h3>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Post Types to Search', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <?php
+                                $post_types = get_post_types(array('public' => true), 'objects');
+                                foreach ($post_types as $post_type) {
+                                    if ($post_type->name === 'attachment') continue;
+                                    $checked = in_array($post_type->name, $predictive_post_types) ? 'checked' : '';
+                                    ?>
+                                    <label style="display: block; margin-bottom: 8px;">
+                                        <input type="checkbox" name="cik_search_predictive_post_types[]" value="<?php echo esc_attr($post_type->name); ?>" <?php echo $checked; ?>>
+                                        <?php echo esc_html($post_type->labels->name); ?>
+                                    </label>
+                                    <?php
+                                }
+                                ?>
+                                <p class="description"><?php _e('Select which post types to include in search results', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Taxonomies to Search', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <?php
+                                $taxonomies = get_taxonomies(array('public' => true), 'objects');
+                                foreach ($taxonomies as $taxonomy) {
+                                    // Skip some built-in taxonomies that don't make sense to search
+                                    if (in_array($taxonomy->name, array('post_format', 'nav_menu', 'link_category', 'wp_theme', 'wp_template_part_area'))) {
+                                        continue;
+                                    }
+                                    $checked = in_array($taxonomy->name, $predictive_taxonomies) ? 'checked' : '';
+                                    ?>
+                                    <label style="display: block; margin-bottom: 8px;">
+                                        <input type="checkbox" name="cik_search_predictive_taxonomies[]" value="<?php echo esc_attr($taxonomy->name); ?>" <?php echo $checked; ?>>
+                                        <?php echo esc_html($taxonomy->labels->name); ?>
+                                        <span style="color: #666; font-size: 11px;">(<?php echo esc_html($taxonomy->name); ?>)</span>
+                                    </label>
+                                    <?php
+                                }
+                                ?>
+                                <p class="description"><?php _e('Select which taxonomies (categories, tags, etc.) to include in search. When enabled, taxonomy terms will also appear in results.', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_prioritize_title_matches"><?php _e('Results Order', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_prioritize_title_matches" name="cik_search_prioritize_title_matches" value="1" <?php checked($prioritize_title_matches, 1); ?>>
+                                    <?php _e('Prioritize title matches over content matches', 'cik-smart-search'); ?>
+                                </label>
+                                <p class="description"><?php _e('When enabled, results matching in the title will appear first, followed by content matches. When disabled, results are ordered by WordPress relevance score.', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                    
+                    <h3 style="margin-top: 40px;"><?php _e('Suggested Keywords', 'cik-smart-search'); ?></h3>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Manual Keywords', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <div id="suggested-keywords-list">
+                                    <?php if (!empty($suggested_keywords)): ?>
+                                        <?php foreach ($suggested_keywords as $index => $keyword): ?>
+                                            <div class="keyword-item" style="margin-bottom: 8px; display: flex; gap: 8px; align-items: center;">
+                                                <input type="text" name="cik_search_suggested_keywords[]" value="<?php echo esc_attr($keyword); ?>" class="regular-text" placeholder="<?php esc_attr_e('Enter keyword', 'cik-smart-search'); ?>">
+                                                <button type="button" class="button remove-keyword" style="color: #dc2626;"><?php _e('Remove', 'cik-smart-search'); ?></button>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </div>
+                                <button type="button" id="add-keyword" class="button" style="margin-top: 8px;"><?php _e('+ Add Keyword', 'cik-smart-search'); ?></button>
+                                <p class="description"><?php _e('Add suggested search keywords that will appear when user clicks on search (before typing). Examples: "shoes", "summer offers", "gift cards"', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_show_popular_searches"><?php _e('Show Popular Searches', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_show_popular_searches" name="cik_search_show_popular_searches" value="1" <?php checked($show_popular_searches, 1); ?>>
+                                    <?php _e('Show most popular searches from analytics', 'cik-smart-search'); ?>
+                                </label>
+                                <p class="description"><?php _e('When enabled, displays trending searches based on real user data (requires Analytics)', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_popular_searches_limit"><?php _e('Popular Searches Limit', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_popular_searches_limit" name="cik_search_popular_searches_limit" value="<?php echo esc_attr($popular_searches_limit); ?>" min="0" style="width: 80px;">
+                                <p class="description"><?php _e('Maximum number of popular searches to fetch from analytics (0 = unlimited)', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_suggested_keywords_limit"><?php _e('Max Suggested Keywords (fetch)', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_suggested_keywords_limit" name="cik_search_suggested_keywords_limit" value="<?php echo esc_attr($suggested_keywords_limit); ?>" min="0" max="200" style="width: 80px;">
+                                <p class="description"><?php _e('Total keywords to prepare in the background (popular first, then manual). Default: 30. Set 0 for unlimited.', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_keywords_display_limit"><?php _e('Max Keywords Displayed', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_keywords_display_limit" name="cik_search_keywords_display_limit" value="<?php echo esc_attr($keywords_display_limit); ?>" min="0" max="200" style="width: 80px;">
+                                <p class="description"><?php _e('How many keywords actually appear in the search box UI. Applies both to the initial tags and when typing. Default: 30. Set 0 for unlimited.', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_keywords_source"><?php _e('Keywords Source', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <select id="cik_search_keywords_source" name="cik_search_keywords_source">
+                                    <option value="mixed" <?php selected($keywords_source, 'mixed'); ?>><?php _e('Manual Keywords + Popular Searches', 'cik-smart-search'); ?></option>
+                                    <option value="popular_only" <?php selected($keywords_source, 'popular_only'); ?>><?php _e('Only Popular Searches from Analytics', 'cik-smart-search'); ?></option>
+                                </select>
+                                <p class="description"><?php _e('Choose whether to show manual keywords combined with popular searches, or only show popular searches from analytics', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                    
+                    <script>
+                    jQuery(document).ready(function($) {
+                        // Add keyword
+                        $('#add-keyword').on('click', function() {
+                            var html = '<div class="keyword-item" style="margin-bottom: 8px; display: flex; gap: 8px; align-items: center;">' +
+                                '<input type="text" name="cik_search_suggested_keywords[]" value="" class="regular-text" placeholder="<?php esc_attr_e('Enter keyword', 'cik-smart-search'); ?>">' +
+                                '<button type="button" class="button remove-keyword" style="color: #dc2626;"><?php _e('Remove', 'cik-smart-search'); ?></button>' +
+                                '</div>';
+                            $('#suggested-keywords-list').append(html);
+                        });
+                        
+                        // Remove keyword
+                        $(document).on('click', '.remove-keyword', function() {
+                            $(this).closest('.keyword-item').remove();
+                        });
+                    });
+                    </script>
+                </div>
+                
+                <!-- Tab 2: Search Box -->
+                <div id="tab-search-box" class="tab-content" style="display: none;">
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Search Placeholder (Fallback)', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:3px;">GR</label>
+                                        <input type="text" id="cik_search_placeholder" name="cik_search_placeholder" value="<?php echo esc_attr($search_placeholder); ?>" class="regular-text">
+                                    </div>
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:3px;">EN</label>
+                                        <input type="text" id="cik_search_placeholder_en" name="cik_search_placeholder_en" value="<?php echo esc_attr($search_placeholder_en); ?>" class="regular-text">
+                                    </div>
+                                </div>
+                                <p class="description"><?php _e('This is used as fallback if animated placeholders are not set', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Animated Placeholders', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:6px;">GR</label>
+                                        <div id="placeholders-container">
+                                            <?php foreach ($search_placeholders as $index => $placeholder_text) : ?>
+                                                <div class="placeholder-row" style="margin-bottom:8px;">
+                                                    <input type="text" name="cik_search_placeholders[<?php echo $index; ?>]" value="<?php echo esc_attr($placeholder_text); ?>" placeholder="<?php _e('Placeholder text', 'cik-smart-search'); ?>" style="width:300px;">
+                                                    <button type="button" class="button remove-placeholder">&times;</button>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                        <button type="button" id="add-placeholder" class="button"><?php _e('Add Placeholder', 'cik-smart-search'); ?></button>
+                                    </div>
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:6px;">EN</label>
+                                        <div id="placeholders-en-container">
+                                            <?php foreach ($search_placeholders_en as $index => $placeholder_text) : ?>
+                                                <div class="placeholder-en-row" style="margin-bottom:8px;">
+                                                    <input type="text" name="cik_search_placeholders_en[<?php echo $index; ?>]" value="<?php echo esc_attr($placeholder_text); ?>" placeholder="<?php _e('Placeholder text EN', 'cik-smart-search'); ?>" style="width:300px;">
+                                                    <button type="button" class="button remove-placeholder-en">&times;</button>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                        <button type="button" id="add-placeholder-en" class="button"><?php _e('Add Placeholder', 'cik-smart-search'); ?></button>
+                                    </div>
+                                </div>
+                                <p class="description" style="margin-top:8px;"><?php _e('Add multiple placeholder texts that will animate in a typewriter loop effect', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Tags Section Title', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:3px;">GR</label>
+                                        <input type="text" id="cik_search_title" name="cik_search_title" value="<?php echo esc_attr($search_title); ?>" class="regular-text">
+                                    </div>
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:3px;">EN</label>
+                                        <input type="text" id="cik_search_title_en" name="cik_search_title_en" value="<?php echo esc_attr($search_title_en); ?>" class="regular-text">
+                                    </div>
+                                </div>
+                                <p class="description"><?php _e('Title above the search tags', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Search Results Title', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:3px;">GR</label>
+                                        <input type="text" id="cik_search_results_title" name="cik_search_results_title" value="<?php echo esc_attr($search_results_title); ?>" class="regular-text">
+                                    </div>
+                                    <div>
+                                        <label style="font-size:11px;color:#666;font-weight:600;display:block;margin-bottom:3px;">EN</label>
+                                        <input type="text" id="cik_search_results_title_en" name="cik_search_results_title_en" value="<?php echo esc_attr($search_results_title_en); ?>" class="regular-text">
+                                    </div>
+                                </div>
+                                <p class="description"><?php _e('Title above the predictive search results (shown when typing 3+ characters)', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Search Tags', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <div id="search-tags-container"> 
+                                    <?php if (!empty($search_tags)) : ?>
+                                        <div style="display:flex;gap:4px;margin-bottom:6px;font-size:11px;color:#666;font-weight:600;">
+                                            <span style="width:165px;"><?php _e('Label (GR)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php _e('Search Term (GR)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php _e('Label (EN)', 'cik-smart-search'); ?></span>
+                                            <span style="width:165px;"><?php _e('Search Term (EN)', 'cik-smart-search'); ?></span>
+                                        </div>
+                                        <?php foreach ($search_tags as $index => $tag) : ?>
+                                            <div class="search-tag-row" style="margin-bottom: 10px; display:flex; gap:4px; align-items:center;">
+                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][label]" value="<?php echo esc_attr($tag['label']); ?>" placeholder="<?php _e('Label GR', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][search_term]" value="<?php echo esc_attr($tag['search_term']); ?>" placeholder="<?php _e('Term GR', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][label_en]" value="<?php echo esc_attr($tag['label_en'] ?? ''); ?>" placeholder="<?php _e('Label EN', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <input type="text" name="cik_search_tags[<?php echo $index; ?>][search_term_en]" value="<?php echo esc_attr($tag['search_term_en'] ?? ''); ?>" placeholder="<?php _e('Term EN', 'cik-smart-search'); ?>" style="width: 160px;">
+                                                <button type="button" class="button remove-tag">×</button>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    <?php endif;
+                                    ?>
+                                </div>
+                                <button type="button" id="add-search-tag" class="button"><?php _e('Add Tag', 'cik-smart-search'); ?></button>
+                                <p class="description"><?php _e('Add search tags that will appear below the search box', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- Tab 2: Predictive Search -->
+                <div id="tab-predictive" class="tab-content" style="display: none;">
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_enable_predictive"><?php _e('Enable Predictive Search', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_enable_predictive" name="cik_search_enable_predictive" value="1" <?php checked($enable_predictive, 1); ?>>
+                                    <?php _e('Show live search suggestions as user types', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_min_chars"><?php _e('Minimum Characters', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_predictive_min_chars" name="cik_search_predictive_min_chars" value="<?php echo esc_attr($predictive_min_chars); ?>" min="1" max="10" style="width: 80px;">
+                                <p class="description"><?php _e('Start showing suggestions after X characters typed', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_delay"><?php _e('Search Delay (ms)', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_predictive_delay" name="cik_search_predictive_delay" value="<?php echo esc_attr($predictive_delay); ?>" min="100" max="2000" step="100" style="width: 100px;">
+                                <p class="description"><?php _e('Delay before triggering search (prevents too many requests)', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_max_results"><?php _e('Maximum Results', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_predictive_max_results" name="cik_search_predictive_max_results" value="<?php echo esc_attr($predictive_max_results); ?>" min="1" max="20" style="width: 80px;">
+                                <p class="description"><?php _e('Number of suggestions to display', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_show_images"><?php _e('Show Featured Images', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_predictive_show_images" name="cik_search_predictive_show_images" value="1" <?php checked($predictive_show_images, 1); ?>>
+                                    <?php _e('Display featured image thumbnails in suggestions', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_show_excerpt"><?php _e('Show Excerpt', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_predictive_show_excerpt" name="cik_search_predictive_show_excerpt" value="1" <?php checked($predictive_show_excerpt, 1); ?>>
+                                    <?php _e('Display post excerpt in suggestions', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_show_matched_content"><?php _e('Show Matched Content', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_predictive_show_matched_content" name="cik_search_predictive_show_matched_content" value="1" <?php checked($predictive_show_matched_content, 1); ?>>
+                                    <?php _e('Display snippet with highlighted search terms', 'cik-smart-search'); ?>
+                                </label>
+                                <p class="description"><?php _e('Shows where in the content the search term was found', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_show_match_location"><?php _e('Show Match Location', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_predictive_show_match_location" name="cik_search_predictive_show_match_location" value="1" <?php checked($predictive_show_match_location, 1); ?>>
+                                    <?php _e('Display "Found in title" or "Found in content" label', 'cik-smart-search'); ?>
+                                </label>
+                                <p class="description"><?php _e('If unchecked, only shows the highlighted snippet without location label', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_search_title_only"><?php _e('Search Title Only', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_predictive_search_title_only" name="cik_search_predictive_search_title_only" value="1" <?php checked($search_title_only, 1); ?>>
+                                    <?php _e('Search only in post titles (faster but less comprehensive)', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_predictive_cache_duration"><?php _e('Cache Duration', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_predictive_cache_duration" name="cik_search_predictive_cache_duration" value="<?php echo esc_attr($cache_duration); ?>" min="1" max="60" class="small-text">
+                                <?php _e('minutes', 'cik-smart-search'); ?>
+                                <p class="description"><?php _e('How long to cache search results (improves performance)', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label><?php _e('Clear Cache', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <button type="submit" name="cik_search_clear_cache" class="button" onclick="return confirm('<?php esc_attr_e('Are you sure you want to clear the predictive search cache?', 'cik-smart-search'); ?>');">
+                                    <?php _e('Clear Predictive Search Cache', 'cik-smart-search'); ?>
+                                </button>
+                                <p class="description"><?php _e('Clear cached search results to see immediate changes', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- Tab 3: Voice Search -->
+                <div id="tab-voice" class="tab-content" style="display: none;">
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_voice_auto_submit"><?php _e('Auto Submit', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_voice_auto_submit" name="cik_search_voice_auto_submit" value="1" <?php checked($voice_auto_submit, 1); ?>>
+                                    <?php _e('Automatically submit the search form when voice input is complete', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_voice_listening_color"><?php _e('Listening Background Color', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="text" id="cik_search_voice_listening_color" name="cik_search_voice_listening_color" value="<?php echo esc_attr($voice_listening_color); ?>" class="color-picker">
+                                <p class="description"><?php _e('Background color of the microphone icon while listening', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_voice_language"><?php _e('Voice Language', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <select id="cik_search_voice_language" name="cik_search_voice_language">
+                                    <option value="el-GR" <?php selected($voice_language, 'el-GR'); ?>>Ελληνικά (Greek)</option>
+                                    <option value="en-US" <?php selected($voice_language, 'en-US'); ?>>English (US)</option>
+                                    <option value="en-GB" <?php selected($voice_language, 'en-GB'); ?>>English (UK)</option>
+                                    <option value="de-DE" <?php selected($voice_language, 'de-DE'); ?>>Deutsch (German)</option>
+                                    <option value="fr-FR" <?php selected($voice_language, 'fr-FR'); ?>>Français (French)</option>
+                                    <option value="es-ES" <?php selected($voice_language, 'es-ES'); ?>>Español (Spanish)</option>
+                                    <option value="it-IT" <?php selected($voice_language, 'it-IT'); ?>>Italiano (Italian)</option>
+                                </select>
+                                <p class="description"><?php _e('Language for voice recognition', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- Tab 4: Analytics -->
+                <div id="tab-analytics" class="tab-content" style="display: none;">
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_enable_analytics"><?php _e('Enable Search Analytics', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_enable_analytics" name="cik_search_enable_analytics" value="1" <?php checked($enable_analytics, 1); ?>>
+                                    <?php _e('Track all search queries in the database. View analytics in "Analytics" menu.', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_log_ip"><?php _e('Log User IP', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <label>
+                                    <input type="checkbox" id="cik_search_log_ip" name="cik_search_log_ip" value="1" <?php checked($log_ip, 1); ?>>
+                                    <?php _e('Store user IP addresses for analytics (check GDPR compliance)', 'cik-smart-search'); ?>
+                                </label>
+                            </td>
+                        </tr>
+                        
+                        <tr>
+                            <th scope="row">
+                                <label for="cik_search_analytics_retention"><?php _e('Data Retention', 'cik-smart-search'); ?></label>
+                            </th>
+                            <td>
+                                <input type="number" id="cik_search_analytics_retention" name="cik_search_analytics_retention" value="<?php echo esc_attr($analytics_retention); ?>" min="0" max="365" style="width: 80px;">
+                                <?php _e('days', 'cik-smart-search'); ?>
+                                <p class="description"><?php _e('Delete search logs older than X days (0 = keep forever)', 'cik-smart-search'); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <?php submit_button(__('Save Settings', 'cik-smart-search'), 'primary', 'cik_search_save'); ?>
+            </form>
+        </div>
+        
+        <style>
+            .nav-tab-wrapper { margin-bottom: 20px; }
+            .tab-content { background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-top: 0; }
+            .search-tag-row, .placeholder-row { display: flex; gap: 10px; align-items: center; }
+            .remove-tag, .remove-placeholder { color: #dc3232; font-size: 20px; line-height: 1; }
+        </style>
+        
+        <script>
+        jQuery(document).ready(function($) {
+            // Tab switching
+            $('.nav-tab').on('click', function(e) {
+                e.preventDefault();
+                var target = $(this).attr('href');
+                
+                $('.nav-tab').removeClass('nav-tab-active');
+                $(this).addClass('nav-tab-active');
+                
+                $('.tab-content').hide();
+                $(target).show();
+            });
+            
+            // Add placeholder (GR)
+            var placeholderIndex = <?php echo count($search_placeholders); ?>;
+            $('#add-placeholder').on('click', function() {
+                var html = '<div class="placeholder-row" style="margin-bottom:8px;">' +
+                    '<input type="text" name="cik_search_placeholders[' + placeholderIndex + ']" placeholder="<?php _e('Placeholder text', 'cik-smart-search'); ?>" style="width:300px;">' +
+                    '<button type="button" class="button remove-placeholder">&times;</button>' +
+                    '</div>';
+                $('#placeholders-container').append(html);
+                placeholderIndex++;
+            });
+
+            $(document).on('click', '.remove-placeholder', function() {
+                $(this).closest('.placeholder-row').remove();
+            });
+
+            // Add placeholder (EN)
+            var placeholderEnIndex = <?php echo count($search_placeholders_en); ?>;
+            $('#add-placeholder-en').on('click', function() {
+                var html = '<div class="placeholder-en-row" style="margin-bottom:8px;">' +
+                    '<input type="text" name="cik_search_placeholders_en[' + placeholderEnIndex + ']" placeholder="<?php _e('Placeholder text EN', 'cik-smart-search'); ?>" style="width:300px;">' +
+                    '<button type="button" class="button remove-placeholder-en">&times;</button>' +
+                    '</div>';
+                $('#placeholders-en-container').append(html);
+                placeholderEnIndex++;
+            });
+
+            $(document).on('click', '.remove-placeholder-en', function() {
+                $(this).closest('.placeholder-en-row').remove();
+            });
+            
+            // Add tag
+            var tagIndex = <?php echo count($search_tags); ?>;
+            $('#add-search-tag').on('click', function() {
+                var html = '<div class="search-tag-row" style="margin-bottom: 10px; display:flex; gap:4px; align-items:center;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][label]" placeholder="<?php _e('Label GR', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][search_term]" placeholder="<?php _e('Term GR', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][label_en]" placeholder="<?php _e('Label EN', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<input type="text" name="cik_search_tags[' + tagIndex + '][search_term_en]" placeholder="<?php _e('Term EN', 'cik-smart-search'); ?>" style="width: 160px;">' +
+                    '<button type="button" class="button remove-tag">×</button>' +
+                    '</div>';
+                $('#search-tags-container').append(html);
+                tagIndex++;
+            });
+            
+            // Remove tag
+            $(document).on('click', '.remove-tag', function() {
+                $(this).closest('.search-tag-row').remove();
+            });
+        });
+        </script>
+        <?php
+    }
+    
+    /**
+     * Render search box via shortcode
+     */
+    public function render_search_box($atts) {
+        // Parse attributes
+        $atts = shortcode_atts(array(
+            'wrapper_class' => 'cik-search-position',
+        ), $atts);
+        
+        // Get options
+        $search_title = get_option('cik_search_title', __('May interest you', 'cik-smart-search'));
+        $search_results_title = get_option('cik_search_results_title', __('Search Results', 'cik-smart-search'));
+        $search_placeholder = get_option('cik_search_placeholder', __('Search...', 'cik-smart-search'));
+        $search_tags = get_option('cik_search_tags', array());
+
+        // WPML: pick EN fields if current language is English
+        $current_lang = apply_filters('wpml_current_language', null);
+        if ($current_lang === 'en') {
+            $title_en = get_option('cik_search_title_en', '');
+            if (!empty($title_en)) $search_title = $title_en;
+
+            $results_title_en = get_option('cik_search_results_title_en', '');
+            if (!empty($results_title_en)) $search_results_title = $results_title_en;
+
+            $placeholder_en = get_option('cik_search_placeholder_en', '');
+            if (!empty($placeholder_en)) $search_placeholder = $placeholder_en;
+
+            $search_tags = array_map(function($tag) {
+                return array(
+                    'label'       => !empty($tag['label_en']) ? $tag['label_en'] : $tag['label'],
+                    'search_term' => !empty($tag['search_term_en']) ? $tag['search_term_en'] : $tag['search_term'],
+                );
+            }, $search_tags);
+        }
+        
+        // Apply display limit to static tags
+        $display_limit = intval(get_option('cik_search_keywords_display_limit', 30));
+        if ($display_limit > 0 && count($search_tags) > $display_limit) {
+            $search_tags = array_slice($search_tags, 0, $display_limit);
+        }
+        
+        // Start output buffering
+        ob_start();
+        
+        // Load template
+        $template_path = CIK_SEARCH_PATH . 'templates/search-box.php';
+        
+        // Allow theme override
+        $theme_template = locate_template('cik-smart-search/search-box.php');
+        if ($theme_template) {
+            $template_path = $theme_template;
+        }
+        
+        if (file_exists($template_path)) {
+            include $template_path;
+        }
+        
+        return ob_get_clean();
+    }
+    
+    /**
+     * Add settings link to plugins page
+     */
+    public function add_settings_link($links) {
+        $settings_link = '<a href="' . admin_url('admin.php?page=cik-smart-search') . '">' . __('Settings', 'cik-smart-search') . '</a>';
+        $analytics_link = '<a href="' . admin_url('edit.php?post_type=cik_search_log') . '" style="color:#2271b1;font-weight:600;">' . __('Analytics', 'cik-smart-search') . '</a>';
+        array_unshift($links, $analytics_link, $settings_link);
+        return $links;
+    }
+    
+    /**
+     * AJAX handler for predictive search
+     */
+    public function ajax_predictive_search() {
+        // Verify nonce
+        check_ajax_referer('cik_search_predictive_search', 'nonce');
+        
+        $query = isset($_GET['query']) ? sanitize_text_field($_GET['query']) : '';
+        
+        if (empty($query)) {
+            wp_send_json_error('Empty query');
+        }
+        
+        // Get settings
+        $cache_duration = get_option('cik_search_predictive_cache_duration', 5);
+        
+        // Check cache first (temporarily disabled for Greeklish testing)
+        $cache_key = 'cik_search_results_' . md5($query . serialize(get_option('cik_search_predictive_post_types', array())) . serialize(get_option('cik_search_predictive_taxonomies', array())));
+        $cached_results = false; // Temporarily disabled for testing
+        
+        if ($cached_results !== false) {
+            wp_send_json_success($cached_results);
+        }
+        
+        // Get settings
+        $max_results = get_option('cik_search_predictive_max_results', 5);
+        $post_types = get_option('cik_search_predictive_post_types', array('post', 'page'));
+
+        $show_images = get_option('cik_search_predictive_show_images', 1);
+        $show_excerpt = get_option('cik_search_predictive_show_excerpt', 1);
+        $search_title_only = get_option('cik_search_predictive_search_title_only', 0);
+        
+        // Optimized search query - search only in titles for speed (if enabled)
+        if ($search_title_only) {
+            add_filter('posts_search', array($this, 'search_by_title_only'), 500, 2);
+        }
+        
+        // For predictive search, don't use Greeklish conversion
+        // It causes false positives (e.g., "Oil" -> "οιλ") and uses AND instead of OR
+        // Users can type in Greek directly for Greek results
+        $search_query_text = $query;
+        
+        /* Greeklish conversion disabled for predictive search
+        $current_lang = $this->get_current_language();
+        
+        if ($current_lang === 'el' && $this->is_likely_greeklish($query)) {
+            $greek_version = $this->greeklish_to_greek($query);
+            $search_query_text = $query . ' ' . $greek_version;
+        }
+        */
+        
+        $args = array(
+            's'                      => $search_query_text,
+            'post_type'              => $post_types,
+            'posts_per_page'         => $max_results,
+            'post_status'            => 'publish',
+            'orderby'                => 'relevance',
+            'order'                  => 'DESC',
+            'no_found_rows'          => true,
+            'update_post_meta_cache' => false,
+            'update_post_term_cache' => false,
+            'ignore_sticky_posts'    => true,
+            'suppress_filters'       => false,
+        );
+        
+        $search_query = new WP_Query($args);
+        
+        // Remove filter after query
+        if ($search_title_only) {
+            remove_filter('posts_search', array($this, 'search_by_title_only'), 500);
+        }
+        
+        $results = array();
+        
+        if ($search_query->have_posts()) {
+            while ($search_query->have_posts()) {
+                $search_query->the_post();
+                
+                $post_id = get_the_ID();
+                $post_type = get_post_type();
+                
+                $result = array(
+                    'title'     => get_the_title(),
+                    'url'       => get_permalink(),
+                    'post_type' => $post_type,
+                    'type'      => get_post_type_object($post_type)->labels->singular_name,
+                    'date'      => get_the_date(),
+                );
+                
+                // Add featured image if enabled (optimized - no full post object)
+                if ($show_images) {
+                    $thumb_id = get_post_thumbnail_id($post_id);
+                    if ($thumb_id) {
+                        $result['image'] = wp_get_attachment_image_url($thumb_id, 'thumbnail');
+                    }
+                }
+                
+                // Add excerpt if enabled (optimized)
+                if ($show_excerpt) {
+                    $excerpt = has_excerpt() ? get_the_excerpt() : wp_trim_words(get_the_content(), 20, '...');
+                    if (!empty($excerpt)) {
+                        $result['excerpt'] = wp_strip_all_tags($excerpt);
+                        $result['excerpt'] = wp_trim_words($result['excerpt'], 15, '...');
+                    }
+                }
+                
+                // Add matched content snippet with highlighting
+                $show_matched_content = get_option('cik_search_predictive_show_matched_content', 1);
+                $show_match_location = get_option('cik_search_predictive_show_match_location', 1);
+                
+                // Get full content - use $post directly for WooCommerce compatibility
+                global $post;
+                $full_content = $post->post_content;
+                
+                // Also include short description for WooCommerce products
+                if (get_post_type() === 'product') {
+                    $short_desc = get_post_meta($post_id, '_excerpt', true);
+                    if (empty($short_desc)) {
+                        $short_desc = $post->post_excerpt;
+                    }
+                    $full_content = $short_desc . ' ' . $full_content;
+                }
+                
+                // Add matched content if enabled
+                if ($show_matched_content) {
+                    $matched = $this->get_matched_content($full_content, get_the_title(), $query, $show_match_location);
+                    $result['matched_content'] = $matched;
+                }
+                
+                // Check if match is in title (for prioritization)
+                $result['match_in_title'] = $this->has_match_in_title(get_the_title(), $query);
+                
+                $results[] = $result;
+            }
+            wp_reset_postdata();
+        }
+        
+        // Search in taxonomies if enabled
+        $taxonomies = get_option('cik_search_predictive_taxonomies', array());
+        if (!empty($taxonomies) && count($results) < $max_results) {
+            $taxonomy_results = $this->search_taxonomies($query, $taxonomies, $max_results - count($results));
+            $results = array_merge($results, $taxonomy_results);
+        }
+        
+        // Prioritize title matches if enabled
+        $prioritize_title_matches = get_option('cik_search_prioritize_title_matches', 0);
+        if ($prioritize_title_matches) {
+            usort($results, function($a, $b) {
+                // Title matches come first
+                $a_title_match = isset($a['match_in_title']) ? $a['match_in_title'] : false;
+                $b_title_match = isset($b['match_in_title']) ? $b['match_in_title'] : false;
+                
+                if ($a_title_match && !$b_title_match) {
+                    return -1; // a comes first
+                } elseif (!$a_title_match && $b_title_match) {
+                    return 1; // b comes first
+                } else {
+                    return 0; // keep original order
+                }
+            });
+        }
+        
+        // Remove match_in_title flag before sending (internal use only)
+        foreach ($results as &$result) {
+            unset($result['match_in_title']);
+        }
+        
+        // Cache results (duration in minutes from settings)
+        set_transient($cache_key, $results, $cache_duration * MINUTE_IN_SECONDS);
+        
+        wp_send_json_success($results);
+    }
+    
+    /**
+     * AJAX handler for suggested keywords with server-side filtering
+     */
+    public function ajax_get_suggestions() {
+        // Verify nonce
+        check_ajax_referer('cik_search_predictive_search', 'nonce');
+        
+        // Get query parameter for filtering
+        $query = isset($_GET['query']) ? sanitize_text_field($_GET['query']) : '';
+        $query = trim($query);
+        
+        $suggestions = array(
+            'manual' => array(),
+            'popular' => array()
+        );
+        
+        // Don't return keywords for empty query - only when user types
+        if (empty($query)) {
+            wp_send_json_success($suggestions);
+            return;
+        }
+        
+        // Pre-normalize query ONCE for all matching
+        $normalized_query = $this->remove_greek_accents(mb_strtolower($query, 'UTF-8'));
+        
+        // Get keywords source setting
+        $keywords_source = get_option('cik_search_keywords_source', 'mixed');
+        
+        // Get manual keywords (only if source is 'mixed')
+        if ($keywords_source !== 'popular_only') {
+            // Try to get from wp_cache first (object cache)
+            $cache_key = 'cik_search_manual_keywords';
+            $manual_keywords = wp_cache_get($cache_key);
+            
+            if ($manual_keywords === false) {
+                // Not in cache, get from database
+                $manual_keywords = get_option('cik_search_suggested_keywords', array());
+                
+                // Store in object cache for 1 hour
+                wp_cache_set($cache_key, $manual_keywords, '', 3600);
+            }
+            
+            if (!empty($manual_keywords)) {
+                foreach ($manual_keywords as $keyword) {
+                    // Fast matching with pre-normalized query
+                    $normalized_keyword = $this->remove_greek_accents(mb_strtolower($keyword, 'UTF-8'));
+                    
+                    if (mb_strpos($normalized_keyword, $normalized_query, 0, 'UTF-8') !== false) {
+                        $suggestions['manual'][] = array(
+                            'text' => $keyword,
+                            'type' => 'manual'
+                        );
+                    }
+                }
+            }
+        }
+        
+        // Get popular searches from analytics (if enabled)
+        $show_popular = get_option('cik_search_show_popular_searches', 1);
+        $enable_analytics = get_option('cik_search_enable_analytics', 1);
+        
+        if ($show_popular && $enable_analytics) {
+            $limit = get_option('cik_search_popular_searches_limit', 5);
+            $popular_searches = $this->get_popular_searches($limit);
+            
+            foreach ($popular_searches as $search) {
+                // Fast matching with pre-normalized query
+                $normalized_search = $this->remove_greek_accents(mb_strtolower($search['query'], 'UTF-8'));
+                
+                if (mb_strpos($normalized_search, $normalized_query, 0, 'UTF-8') !== false) {
+                    $suggestions['popular'][] = array(
+                        'text' => $search['query'],
+                        'count' => $search['count'],
+                        'type' => 'popular'
+                    );
+                }
+            }
+        }
+        
+        wp_send_json_success($suggestions);
+    }
+    
+    /**
+     * Check if text matches query (accent-insensitive for Greek)
+     * 
+     * @param string $text Text to search in
+     * @param string $query Query to search for
+     * @return bool True if matches
+     */
+    private function matches_query_accent_insensitive($text, $query) {
+        // Convert to lowercase
+        $text = mb_strtolower($text, 'UTF-8');
+        $query = mb_strtolower($query, 'UTF-8');
+        
+        // Remove Greek accents
+        $text = $this->remove_greek_accents($text);
+        $query = $this->remove_greek_accents($query);
+        
+        // Check if text contains query
+        return mb_strpos($text, $query, 0, 'UTF-8') !== false;
+    }
+    
+    /**
+     * Remove Greek accents for matching
+     * 
+     * @param string $str String with accents
+     * @return string String without accents
+     */
+    private function remove_greek_accents($str) {
+        $accents = array(
+            'ά' => 'α', 'έ' => 'ε', 'ή' => 'η', 'ί' => 'ι', 'ό' => 'ο', 'ύ' => 'υ', 'ώ' => 'ω',
+            'Ά' => 'Α', 'Έ' => 'Ε', 'Ή' => 'Η', 'Ί' => 'Ι', 'Ό' => 'Ο', 'Ύ' => 'Υ', 'Ώ' => 'Ω',
+            'ΐ' => 'ι', 'ΰ' => 'υ', 'ϊ' => 'ι', 'ϋ' => 'υ'
+        );
+        return str_replace(array_keys($accents), array_values($accents), $str);
+    }
+    
+    /**
+     * Get popular searches from analytics
+     * 
+     * @param int $limit Number of results (0 = unlimited)
+     * @return array Array of popular searches
+     */
+    private function get_popular_searches($limit = 5) {
+        // Try to get from cache first (1 hour cache for performance)
+        $cache_key = 'cik_search_popular_searches_' . $limit;
+        $cached = get_transient($cache_key);
+        
+        if ($cached !== false) {
+            return $cached;
+        }
+        
+        global $wpdb;
+        
+        // Get searches from last 30 days with search count from meta
+        $date_from = date('Y-m-d', strtotime('-30 days'));
+        
+        // Query using _search_count and _results_count meta fields, ordered by searches then results
+        if ($limit > 0) {
+            $query = $wpdb->prepare("
+                SELECT p.post_title as query,
+                       COALESCE(CAST(pm_count.meta_value AS UNSIGNED), 1) as count,
+                       COALESCE(CAST(pm_results.meta_value AS UNSIGNED), 0) as results
+                FROM {$wpdb->posts} p
+                LEFT JOIN {$wpdb->postmeta} pm_count ON p.ID = pm_count.post_id AND pm_count.meta_key = '_search_count'
+                LEFT JOIN {$wpdb->postmeta} pm_results ON p.ID = pm_results.post_id AND pm_results.meta_key = '_results_count'
+                WHERE p.post_type = 'cik_search_log'
+                AND p.post_status = 'publish'
+                AND p.post_modified >= %s
+                AND p.post_title != ''
+                ORDER BY count DESC, results DESC, p.post_modified DESC
+                LIMIT %d
+            ", $date_from, $limit);
+        } else {
+            $query = $wpdb->prepare("
+                SELECT p.post_title as query,
+                       COALESCE(CAST(pm_count.meta_value AS UNSIGNED), 1) as count,
+                       COALESCE(CAST(pm_results.meta_value AS UNSIGNED), 0) as results
+                FROM {$wpdb->posts} p
+                LEFT JOIN {$wpdb->postmeta} pm_count ON p.ID = pm_count.post_id AND pm_count.meta_key = '_search_count'
+                LEFT JOIN {$wpdb->postmeta} pm_results ON p.ID = pm_results.post_id AND pm_results.meta_key = '_results_count'
+                WHERE p.post_type = 'cik_search_log'
+                AND p.post_status = 'publish'
+                AND p.post_modified >= %s
+                AND p.post_title != ''
+                ORDER BY count DESC, results DESC, p.post_modified DESC
+            ", $date_from);
+        }
+        
+        // Execute with timeout protection
+        $results = $wpdb->get_results($query, ARRAY_A);
+        
+        $results = $results ?: array();
+        
+        // Cache for 1 hour (3600 seconds) for better performance
+        set_transient($cache_key, $results, 3600);
+        
+        return $results;
+    }
+    
+    /**
+     * Search in taxonomy terms (categories, tags, etc.)
+     * 
+     * @param string $query Search query
+     * @param array $taxonomies Taxonomies to search in
+     * @param int $limit Maximum number of results
+     * @return array Array of taxonomy term results
+     */
+    private function search_taxonomies($query, $taxonomies, $limit = 5) {
+        $results = array();
+        
+        if (empty($taxonomies) || empty($query)) {
+            return $results;
+        }
+        
+        // Prepare search query (Greeklish support)
+        $current_lang = $this->get_current_language();
+        $search_terms = array($query);
+        
+        // Add Greek version if Greeklish
+        if ($current_lang === 'el' && $this->is_likely_greeklish($query)) {
+            $greek_version = $this->greeklish_to_greek($query);
+            if ($greek_version !== $query) {
+                $search_terms[] = $greek_version;
+            }
+        }
+        
+        // Search for terms that match the query
+        $terms = get_terms(array(
+            'taxonomy' => $taxonomies,
+            'hide_empty' => true,
+            'search' => $query,
+            'number' => $limit,
+        ));
+        
+        if (!empty($terms) && !is_wp_error($terms)) {
+            foreach ($terms as $term) {
+                $taxonomy_obj = get_taxonomy($term->taxonomy);
+                
+                $result = array(
+                    'title'         => $term->name,
+                    'url'           => get_term_link($term),
+                    'taxonomy_slug' => $term->taxonomy,
+                    'post_type'     => $term->taxonomy,
+                    'type'          => $taxonomy_obj->labels->singular_name,
+                    'taxonomy'      => true,
+                    'count'         => $term->count,
+                );
+                
+                // Add description as excerpt if available
+                if (!empty($term->description)) {
+                    $result['excerpt'] = wp_trim_words(wp_strip_all_tags($term->description), 15, '...');
+                }
+                
+                // Highlight matched content in term name
+                $show_matched_content = get_option('cik_search_predictive_show_matched_content', 1);
+                if ($show_matched_content) {
+                    $matched = $this->highlight_text($term->name, array($query));
+                    $result['matched_content'] = $matched;
+                }
+                
+                // Taxonomies always match in "title" (term name)
+                $result['match_in_title'] = true;
+                
+                $results[] = $result;
+                
+                if (count($results) >= $limit) {
+                    break;
+                }
+            }
+        }
+        
+        return $results;
+    }
+    
+    /**
+     * Get matched content snippet with highlighting
+     */
+    private function get_matched_content($content, $title, $query, $show_location = true) {
+        // Remove HTML tags
+        $content = wp_strip_all_tags($content);
+        $title_text = wp_strip_all_tags($title);
+        
+        // Prepare search terms
+        $search_terms = array_filter(explode(' ', $query));
+        
+        // Add Greeklish-to-Greek conversions to search terms (only for Greek language and likely Greeklish)
+        $current_lang = $this->get_current_language();
+        $expanded_terms = array();
+        foreach ($search_terms as $term) {
+            $expanded_terms[] = $term; // Original term
+            
+            // Check if current language is Greek AND term is likely Greeklish
+            if ($current_lang === 'el' && $this->is_likely_greeklish($term)) {
+                $greek_version = $this->greeklish_to_greek($term);
+                if ($greek_version !== $term) {
+                    $expanded_terms[] = $greek_version; // Add Greek conversion
+                }
+            }
+        }
+        $search_terms = array_unique($expanded_terms);
+        
+        // If no search terms, return title
+        if (empty($search_terms)) {
+            if ($show_location) {
+                return '<strong>' . __('Result:', 'cik-smart-search') . '</strong> ' . $title_text;
+            }
+            return $title_text;
+        }
+        
+        $best_match = '';
+        $max_matches = 0;
+        $found_in_title = false;
+        
+        // Check if text contains Greek characters
+        $has_greek = preg_match('/[\x{0370}-\x{03FF}\x{1F00}-\x{1FFF}]/u', $title_text . $content);
+        
+        // Create versions for matching (accent-free for Greek, lowercase for others)
+        if ($has_greek) {
+            $title_no_accents = $this->remove_greek_accents(mb_strtolower($title_text, 'UTF-8'));
+            $content_no_accents = $this->remove_greek_accents(mb_strtolower($content, 'UTF-8'));
+        } else {
+            $title_no_accents = mb_strtolower($title_text, 'UTF-8');
+            $content_no_accents = mb_strtolower($content, 'UTF-8');
+        }
+        
+        // Check if ANY query term matches in title
+        foreach ($search_terms as $term) {
+            if (mb_strlen($term) >= 2) {
+                $term_no_accents = $has_greek 
+                    ? $this->remove_greek_accents(mb_strtolower($term, 'UTF-8'))
+                    : mb_strtolower($term, 'UTF-8');
+                    
+                // Search in normalized version
+                if (mb_strpos($title_no_accents, $term_no_accents, 0, 'UTF-8') !== false) {
+                    $found_in_title = true;
+                    break;
+                }
+            }
+        }
+        
+        // If found in title, return highlighted title
+        if ($found_in_title) {
+            $highlighted = $this->highlight_text($title_text, $search_terms);
+            if ($show_location) {
+                return '<strong>' . __('Found in the title:', 'cik-smart-search') . '</strong> ' . $highlighted;
+            } else {
+                return $highlighted;
+            }
+        }
+        
+        // Search in content
+        $content_has_match = false;
+        if (!empty($content) && mb_strlen($content) >= 10) {
+            // Find the FIRST match in content
+            foreach ($search_terms as $term) {
+                if (mb_strlen($term) < 2) continue;
+                
+                $term_no_accents = $has_greek 
+                    ? $this->remove_greek_accents(mb_strtolower($term, 'UTF-8'))
+                    : mb_strtolower($term, 'UTF-8');
+                    
+                // Search in normalized version
+                $pos = mb_strpos($content_no_accents, $term_no_accents, 0, 'UTF-8');
+                
+                if ($pos !== false) {
+                    $content_has_match = true;
+                    
+                    // Get context around the FIRST match (150 chars)
+                    // Use position from original content (with accents)
+                    $start = max(0, $pos - 75);
+                    $length = 150;
+                    $snippet = mb_substr($content, $start, $length); // Keep original with accents
+                    
+                    // Trim to word boundaries
+                    if ($start > 0) {
+                        $snippet = preg_replace('/^\S*\s+/', '...', $snippet);
+                    }
+                    if ($start + $length < mb_strlen($content)) {
+                        $snippet = preg_replace('/\s+\S*$/', '...', $snippet);
+                    }
+                    
+                    $best_match = $snippet;
+                    break; // Use FIRST match only
+                }
+            }
+        }
+        
+        // If match found in content, return it
+        if ($content_has_match && !empty($best_match)) {
+            $highlighted = $this->highlight_text($best_match, $search_terms);
+            if ($show_location) {
+                return '<strong>' . __('Found in the content:', 'cik-smart-search') . '</strong> ' . $highlighted;
+            } else {
+                return $highlighted;
+            }
+        }
+        
+        // Fallback: Always show the title (even without exact match)
+        if (!empty($title_text)) {
+            $highlighted = $this->highlight_text($title_text, $search_terms);
+            if ($show_location) {
+                return '<strong>' . __('Result:', 'cik-smart-search') . '</strong> ' . $highlighted;
+            } else {
+                return $highlighted;
+            }
+        }
+        
+        return '';
+    }
+    
+    /**
+     * Check if search query matches in title
+     * 
+     * @param string $title Post/term title
+     * @param string $query Search query
+     * @return bool True if match found in title
+     */
+    private function has_match_in_title($title, $query) {
+        $title_text = wp_strip_all_tags($title);
+        
+        // Prepare search terms
+        $search_terms = array_filter(explode(' ', $query));
+        
+        // Add Greeklish-to-Greek conversions to search terms (only for Greek language and likely Greeklish)
+        $current_lang = $this->get_current_language();
+        $expanded_terms = array();
+        foreach ($search_terms as $term) {
+            $expanded_terms[] = $term; // Original term
+            
+            // Check if current language is Greek AND term is likely Greeklish
+            if ($current_lang === 'el' && $this->is_likely_greeklish($term)) {
+                $greek_version = $this->greeklish_to_greek($term);
+                if ($greek_version !== $term) {
+                    $expanded_terms[] = $greek_version; // Add Greek conversion
+                }
+            }
+        }
+        $search_terms = array_unique($expanded_terms);
+        
+        // Check if text contains Greek characters
+        $has_greek = preg_match('/[\x{0370}-\x{03FF}\x{1F00}-\x{1FFF}]/u', $title_text);
+        
+        // Create normalized version for matching
+        if ($has_greek) {
+            $title_no_accents = $this->remove_greek_accents(mb_strtolower($title_text, 'UTF-8'));
+        } else {
+            $title_no_accents = mb_strtolower($title_text, 'UTF-8');
+        }
+        
+        // Check if ANY query term matches in title
+        foreach ($search_terms as $term) {
+            if (mb_strlen($term) >= 2) {
+                $term_no_accents = $has_greek 
+                    ? $this->remove_greek_accents(mb_strtolower($term, 'UTF-8'))
+                    : mb_strtolower($term, 'UTF-8');
+                    
+                // Search in normalized version
+                if (mb_strpos($title_no_accents, $term_no_accents, 0, 'UTF-8') !== false) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Get current language (WPML/Polylang compatible, works without multilingual plugins)
+     * Returns 'el' for Greek, 'en' for English, etc.
+     * Safe to use even if WPML/Polylang are not installed
+     * 
+     * @return string Language code (ISO 639-1: 'el', 'en', 'fr', etc.)
+     */
+    private function get_current_language() {
+        // Check if WPML is active (most common multilingual plugin)
+        if (defined('ICL_LANGUAGE_CODE') && ICL_LANGUAGE_CODE) {
+            return ICL_LANGUAGE_CODE;
+        }
+        
+        // Check Polylang (function_exists ensures no errors if not installed)
+        if (function_exists('pll_current_language')) {
+            /** @var callable $pll_current_language */
+            $lang = call_user_func('pll_current_language');
+            if (!empty($lang)) {
+                return $lang;
+            }
+        }
+        
+        // Check qTranslate-X
+        if (function_exists('qtranxf_getLanguage')) {
+            /** @var callable $qtranxf_getLanguage */
+            $lang = call_user_func('qtranxf_getLanguage');
+            if (!empty($lang)) {
+                return $lang;
+            }
+        }
+        
+        // Fallback: Use WordPress locale
+        $locale = get_locale(); // e.g., 'el_GR', 'en_US', 'fr_FR'
+        
+        // Extract language code from locale (before underscore)
+        if (strpos($locale, '_') !== false) {
+            $lang_code = substr($locale, 0, strpos($locale, '_')); // 'el_GR' → 'el'
+        } else {
+            $lang_code = $locale; // 'el' → 'el'
+        }
+        
+        // Normalize to lowercase
+        $lang_code = strtolower($lang_code);
+        
+        // Return language code if valid (2 letters), otherwise default to 'en'
+        return (strlen($lang_code) === 2) ? $lang_code : 'en';
+    }
+    
+    /**
+     * Check if text is likely Greeklish (not pure English)
+     * Greeklish contains characteristic combinations like th, ch, ps, ou, etc.
+     */
+    private function is_likely_greeklish($text) {
+        // If already contains Greek characters, it's not Greeklish
+        if (preg_match('/[\x{0370}-\x{03FF}\x{1F00}-\x{1FFF}]/u', $text)) {
+            return false;
+        }
+        
+        // If doesn't contain Latin characters, it's not Greeklish
+        if (!preg_match('/[a-zA-Z]/', $text)) {
+            return false;
+        }
+        
+        $text_lower = mb_strtolower($text, 'UTF-8');
+        
+        // Common English words that might trigger false positives - exclude them
+        $common_english = array(
+            'the', 'this', 'that', 'these', 'those', 'there', 'their', 'they',
+            'about', 'house', 'mouse', 'through', 'thought', 'though',
+            'could', 'should', 'would', 'our', 'your', 'four', 'pour',
+            'out', 'shout', 'route', 'south', 'mouth', 'youth',
+            'search', 'reach', 'beach', 'teach', 'each', 'such', 'much', 'touch',
+            'with', 'without', 'within', 'other', 'another', 'nothing', 'something',
+            'chorus', 'chaos', 'echo', 'anchor', 'chrome', 'chronic'
+        );
+        
+        if (in_array($text_lower, $common_english)) {
+            return false;
+        }
+        
+        $score = 0;
+        
+        // Strong Greeklish patterns (score +3 each)
+        $strong_patterns = array(
+            'th', 'ch', 'ps', 'ks', 'mp', 'nt', 'gk', 'ng', 'gg', 'tch', 'sch'
+        );
+        foreach ($strong_patterns as $pattern) {
+            if (strpos($text_lower, $pattern) !== false) {
+                $score += 3;
+            }
+        }
+        
+        // Medium Greeklish patterns (score +2 each)
+        $medium_patterns = array(
+            'ou', 'au', 'eu', 'ei', 'oi', 'ai', 'ts', 'tz', 'dz'
+        );
+        foreach ($medium_patterns as $pattern) {
+            if (strpos($text_lower, $pattern) !== false) {
+                $score += 2;
+            }
+        }
+        
+        // Weak indicators (score +1 each)
+        // Words ending in common Greek endings
+        $greeklish_endings = array('os', 'is', 'as', 'es', 'hs', 'ous', 'eis', 'ais', 'aki', 'ouli', 'itsa');
+        foreach ($greeklish_endings as $ending) {
+            if (substr($text_lower, -strlen($ending)) === $ending) {
+                $score += 1;
+            }
+        }
+        
+        // Words with 'k' followed by vowels (common in Greeklish, less in English)
+        if (preg_match('/k[aeiou]/i', $text_lower)) {
+            $score += 1;
+        }
+        
+        // Words starting with 'v' (very common in Greek: βέρνη → verni)
+        if (preg_match('/^v[aeiou]/i', $text_lower)) {
+            $score += 1;
+        }
+        
+        // High vowel ratio (Greek has many vowels)
+        $vowel_count = preg_match_all('/[aeiouy]/i', $text_lower);
+        $total_length = strlen($text_lower);
+        if ($total_length > 0) {
+            $vowel_ratio = $vowel_count / $total_length;
+            if ($vowel_ratio > 0.4) { // More than 40% vowels
+                $score += 1;
+            }
+        }
+        
+        // If score is 2 or higher, likely Greeklish (lowered threshold for better detection)
+        return $score >= 2;
+    }
+    
+    /**
+     * Convert Greeklish (Latin characters) to Greek
+     */
+    private function greeklish_to_greek($text) {
+        $text = mb_strtolower($text, 'UTF-8');
+        
+        // Complex mappings first (order matters!)
+        $replacements = array(
+            // Three-letter combinations
+            'tch' => 'τσ',
+            'sch' => 'σχ',
+            
+            // Two-letter combinations
+            'th' => 'θ',
+            'ch' => 'χ',
+            'ps' => 'ψ',
+            'ks' => 'ξ',
+            'ts' => 'τσ',
+            'ds' => 'ντζ',
+            'tz' => 'τζ',
+            'dz' => 'ντζ',
+            'mp' => 'μπ',
+            'nt' => 'ντ',
+            'gk' => 'γκ',
+            'gx' => 'γξ',
+            'nk' => 'γκ',
+            'ng' => 'γγ',
+            'gg' => 'γγ',
+            'ou' => 'ου',
+            'au' => 'αυ',
+            'eu' => 'ευ',
+            'ei' => 'ει',
+            'oi' => 'οι',
+            'ai' => 'αι',
+            'ui' => 'υι',
+            
+            // Single letters
+            'a' => 'α',
+            'v' => 'β',
+            'b' => 'μπ',
+            'g' => 'γ',
+            'd' => 'δ',
+            'e' => 'ε',
+            'z' => 'ζ',
+            'i' => 'ι',
+            'h' => 'η',
+            'k' => 'κ',
+            'l' => 'λ',
+            'm' => 'μ',
+            'n' => 'ν',
+            'x' => 'ξ',
+            'o' => 'ο',
+            'p' => 'π',
+            'r' => 'ρ',
+            's' => 'σ',
+            't' => 'τ',
+            'y' => 'υ',
+            'f' => 'φ',
+            'w' => 'ω',
+            'u' => 'ου',
+            'q' => 'κ',
+            'c' => 'κ',
+            'j' => 'τζ',
+        );
+        
+        // Apply replacements
+        foreach ($replacements as $latin => $greek) {
+            $text = str_replace($latin, $greek, $text);
+        }
+        
+        return $text;
+    }
+    
+    /**
+     * Highlight search terms in text (accent-insensitive for Greek text)
+     */
+    private function highlight_text($text, $terms) {
+        // Check if text contains Greek characters
+        $has_greek = preg_match('/[\x{0370}-\x{03FF}\x{1F00}-\x{1FFF}]/u', $text);
+        
+        foreach ($terms as $term) {
+            if (mb_strlen($term) < 2) continue;
+            
+            // For Greek text, use accent-insensitive matching
+            // For other languages, use simple case-insensitive matching
+            if ($has_greek) {
+                // Create accent-free versions for matching
+                $term_no_accents = $this->remove_greek_accents(mb_strtolower($term, 'UTF-8'));
+                $text_no_accents = $this->remove_greek_accents(mb_strtolower($text, 'UTF-8'));
+            } else {
+                // Simple case-insensitive for non-Greek text
+                $term_no_accents = mb_strtolower($term, 'UTF-8');
+                $text_no_accents = mb_strtolower($text, 'UTF-8');
+            }
+            
+            // Find all matches
+            $offset = 0;
+            $text_length = mb_strlen($text, 'UTF-8');
+            $marked_text = '';
+            $last_pos = 0;
+            
+            $term_length = mb_strlen($term_no_accents, 'UTF-8');
+            
+            while (($pos = mb_strpos($text_no_accents, $term_no_accents, $offset, 'UTF-8')) !== false) {
+                // Add text before match
+                $marked_text .= mb_substr($text, $last_pos, $pos - $last_pos, 'UTF-8');
+                
+                // Add highlighted match (keep original with accents)
+                $original_match = mb_substr($text, $pos, $term_length, 'UTF-8');
+                $marked_text .= '<mark>' . $original_match . '</mark>';
+                
+                $last_pos = $pos + $term_length;
+                $offset = $pos + $term_length;
+            }
+            
+            // Add remaining text
+            if ($last_pos < $text_length) {
+                $marked_text .= mb_substr($text, $last_pos, null, 'UTF-8');
+            }
+            
+            // If we found matches, update text
+            if ($last_pos > 0) {
+                $text = $marked_text;
+            }
+        }
+        
+        return $text;
+    }
+    
+    /**
+     * Search only in post title for faster results
+     */
+    public function search_by_title_only($search, $wp_query) {
+        global $wpdb;
+        
+        if (empty($search)) {
+            return $search;
+        }
+        
+        $q = $wp_query->query_vars;
+        $n = !empty($q['exact']) ? '' : '%';
+        $search = '';
+        $searchand = '';
+        
+        foreach ((array) $q['search_terms'] as $term) {
+            $term = esc_sql($wpdb->esc_like($term));
+            $search .= "{$searchand}($wpdb->posts.post_title LIKE '{$n}{$term}{$n}')";
+            $searchand = ' AND ';
+        }
+        
+        if (!empty($search)) {
+            $search = " AND ({$search}) ";
+            if (!is_user_logged_in()) {
+                $search .= " AND ($wpdb->posts.post_password = '') ";
+            }
+        }
+        
+        return $search;
+    }
+    
+    /**
+     * Clear predictive search cache when content changes
+     */
+    public function clear_predictive_cache($post_id = null) {
+        // Delete all transients that start with our prefix
+        global $wpdb;
+        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_cik_search_results_%' OR option_name LIKE '_transient_timeout_cik_search_results_%'");
+    }
+    
+    /**
+     * Register Search Log Custom Post Type
+     */
+    public function register_search_log_post_type() {
+        $labels = array(
+            'name'                  => __('Search Analytics', 'cik-smart-search'),
+            'singular_name'         => __('Search Log', 'cik-smart-search'),
+            'menu_name'             => __('Analytics', 'cik-smart-search'),
+            'all_items'             => __('All Searches', 'cik-smart-search'),
+            'view_item'             => __('View Search', 'cik-smart-search'),
+            'search_items'          => __('Search Logs', 'cik-smart-search'),
+            'not_found'             => __('No searches found', 'cik-smart-search'),
+            'not_found_in_trash'    => __('No searches found in trash', 'cik-smart-search'),
+        );
+        
+        $args = array(
+            'labels'                => $labels,
+            'public'                => false,
+            'show_ui'               => true,
+            'show_in_menu'          => false, // We add it manually via submenu
+            'capability_type'       => 'post',
+            'capabilities'          => array(
+                'create_posts' => false, // Disable manual creation
+            ),
+            'map_meta_cap'          => true,
+            'supports'              => array('title'),
+            'has_archive'           => false,
+            'rewrite'               => false,
+            'delete_with_user'      => false,
+        );
+        
+        register_post_type('cik_search_log', $args);
+        
+        // Ensure database index exists for performance
+        $this->ensure_search_log_index();
+
+        // Migrate existing records that lack _search_term_normalized
+        $this->migrate_search_log_normalized();
+    }
+
+    /**
+     * One-time migration: add _search_term_normalized to existing log entries
+     */
+    private function migrate_search_log_normalized() {
+        if (get_option('cik_search_normalized_migrated')) {
+            return;
+        }
+
+        global $wpdb;
+
+        // Get posts missing the normalized meta
+        $posts = $wpdb->get_results("
+            SELECT p.ID, p.post_title
+            FROM {$wpdb->posts} p
+            LEFT JOIN {$wpdb->postmeta} pm
+                ON p.ID = pm.post_id AND pm.meta_key = '_search_term_normalized'
+            WHERE p.post_type = 'cik_search_log'
+            AND p.post_status = 'publish'
+            AND pm.meta_id IS NULL
+            LIMIT 500
+        ");
+
+        foreach ($posts as $post) {
+            $normalized = $this->normalize_search_term($post->post_title);
+            update_post_meta($post->ID, '_search_term_normalized', $normalized);
+        }
+
+        // If fewer than 500 were returned we've processed all of them
+        if (count($posts) < 500) {
+            update_option('cik_search_normalized_migrated', true);
+        }
+    }
+    
+    /**
+     * Ensure database index exists for fast queries
+     */
+    private function ensure_search_log_index() {
+        global $wpdb;
+        
+        // Check if we've already done this
+        $index_created = get_option('cik_search_index_created', false);
+        if ($index_created) {
+            return;
+        }
+        
+        // Create composite index for fast filtering
+        $wpdb->query("
+            ALTER TABLE {$wpdb->posts} 
+            ADD INDEX IF NOT EXISTS idx_search_log_type_date (post_type, post_date, post_status)
+        ");
+        
+        // Mark as created
+        update_option('cik_search_index_created', true);
+    }
+    
+    /**
+     * Log search queries when submitted
+     */
+    public function log_search_query($query) {
+        // Prevent infinite loops - only run once per request
+        static $already_logging = false;
+        if ($already_logging) {
+            return;
+        }
+        
+        // Only log main search queries, not admin or secondary queries
+        if (!$query->is_main_query() || is_admin() || !$query->is_search()) {
+            return;
+        }
+        
+        // Get cached settings (prevents infinite loop)
+        $settings = $this->get_analytics_settings();
+        
+        // Check if analytics is enabled
+        if (!$settings['enabled']) {
+            return;
+        }
+        
+        $already_logging = true; // Set flag to prevent recursion
+        
+        $search_term = $query->get('s');
+
+        // Skip empty searches
+        if (empty($search_term)) {
+            $already_logging = false;
+            return;
+        }
+
+        // Normalize for deduplication (strip accents, lowercase)
+        $normalized = $this->normalize_search_term($search_term);
+
+        // Check if we should log this search (avoid duplicates in same session)
+        $session_key = 'cik_search_last_search_' . md5($normalized);
+        $last_logged = get_transient($session_key);
+
+        if ($last_logged) {
+            $already_logging = false;
+            return; // Already logged this search recently (within 5 minutes)
+        }
+
+        // Check if this normalized search term already exists
+        global $wpdb;
+        $existing = $wpdb->get_row($wpdb->prepare(
+            "SELECT p.ID FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+            WHERE p.post_type = 'cik_search_log'
+            AND p.post_status = 'publish'
+            AND pm.meta_key = '_search_term_normalized'
+            AND pm.meta_value = %s
+            LIMIT 1",
+            $normalized
+        ));
+
+        if ($existing) {
+            // Update existing record — just increment count
+            $post_id = $existing->ID;
+
+            $current_count = get_post_meta($post_id, '_search_count', true);
+            $new_count = $current_count ? intval($current_count) + 1 : 2;
+            update_post_meta($post_id, '_search_count', $new_count);
+            update_post_meta($post_id, '_last_search_time', current_time('timestamp'));
+
+            wp_update_post(array(
+                'ID'               => $post_id,
+                'post_modified'    => current_time('mysql'),
+                'post_modified_gmt'=> current_time('mysql', 1),
+            ));
+
+        } else {
+            // Create new search log post
+            $post_id = wp_insert_post(array(
+                'post_type'   => 'cik_search_log',
+                'post_title'  => sanitize_text_field($search_term),
+                'post_status' => 'publish',
+                'post_author' => 0,
+            ));
+
+            if ($post_id && !is_wp_error($post_id)) {
+                update_post_meta($post_id, '_search_term',            sanitize_text_field($search_term));
+                update_post_meta($post_id, '_search_term_normalized',  $normalized);
+                update_post_meta($post_id, '_search_time',             current_time('timestamp'));
+                update_post_meta($post_id, '_last_search_time',        current_time('timestamp'));
+                update_post_meta($post_id, '_search_count',            1);
+
+                if ($settings['log_ip']) {
+                    update_post_meta($post_id, '_user_ip', $this->get_user_ip());
+                }
+
+                update_post_meta($post_id, '_user_agent', sanitize_text_field($_SERVER['HTTP_USER_AGENT'] ?? ''));
+                update_post_meta($post_id, '_referer',    sanitize_text_field(wp_get_referer() ?? ''));
+            }
+        }
+        
+        // Update results count after the query runs (for both new and existing)
+        if ($post_id && !is_wp_error($post_id)) {
+            add_action('wp_footer', function() use ($post_id, $query) {
+                if (isset($query->found_posts)) {
+                    update_post_meta($post_id, '_results_count', intval($query->found_posts));
+                }
+            }, 999);
+            
+            // Set transient to avoid duplicate logging (5 minutes)
+            set_transient($session_key, time(), 5 * MINUTE_IN_SECONDS);
+        }
+        
+        $already_logging = false; // Reset flag
+    }
+    
+    /**
+     * Normalize a search term for deduplication.
+     * Strips accents (Greek & Latin), lowercases, collapses whitespace.
+     */
+    private function normalize_search_term($term) {
+        $term = mb_strtolower(trim($term), 'UTF-8');
+
+        // Greek accented → plain
+        $from = ['ά','έ','ή','ί','ϊ','ΐ','ό','ύ','ϋ','ΰ','ώ'];
+        $to   = ['α','ε','η','ι','ι','ι','ο','υ','υ','υ','ω'];
+        $term = str_replace($from, $to, $term);
+
+        // Latin accented → plain
+        $from_l = ['à','á','â','ã','ä','å','è','é','ê','ë','ì','í','î','ï','ò','ó','ô','õ','ö','ù','ú','û','ü','ý','ÿ','ñ','ç'];
+        $to_l   = ['a','a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','y','y','n','c'];
+        $term = str_replace($from_l, $to_l, $term);
+
+        // Collapse multiple spaces
+        return preg_replace('/\s+/', ' ', $term);
+    }
+
+    /**
+     * Get user IP address (safely)
+     */
+    private function get_user_ip() {
+        $ip = '';
+        
+        if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
+            $ip = $_SERVER['HTTP_CLIENT_IP'];
+        } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+        } else {
+            $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+        }
+        
+        return sanitize_text_field($ip);
+    }
+    
+    /**
+     * Custom columns for search log admin
+     */
+    public function search_log_columns($columns) {
+        return array(
+            'cb'            => $columns['cb'],
+            'title'         => __('Search Term', 'cik-smart-search'),
+            'count'         => __('Times Searched', 'cik-smart-search'),
+            'results'       => __('Results', 'cik-smart-search'),
+            'user_ip'       => __('User IP', 'cik-smart-search'),
+            'referer'       => __('Source Page', 'cik-smart-search'),
+            'date'          => __('Last Search', 'cik-smart-search'),
+        );
+    }
+    
+    /**
+     * Display custom column content
+     */
+    public function search_log_column_content($column, $post_id) {
+        switch ($column) {
+            case 'count':
+                $count = get_post_meta($post_id, '_search_count', true);
+                $count = $count ? intval($count) : 1; // Default to 1 if not set (old entries)
+                echo '<strong style="color:#0066b3;font-size:16px;">' . esc_html($count) . '</strong> ' . _n('time', 'times', $count, 'cik-smart-search');
+                break;
+                
+            case 'results':
+                $count = get_post_meta($post_id, '_results_count', true);
+                if ($count !== '') {
+                    echo '<strong>' . esc_html($count) . '</strong> ' . _n('result', 'results', $count, 'cik-smart-search');
+                } else {
+                    echo '<span style="color:#999;">—</span>';
+                }
+                break;
+                
+            case 'user_ip':
+                $ip = get_post_meta($post_id, '_user_ip', true);
+                if ($ip) {
+                    echo '<code style="font-size:11px;">' . esc_html($ip) . '</code>';
+                } else {
+                    echo '<span style="color:#999;">—</span>';
+                }
+                break;
+                
+            case 'referer':
+                $referer = get_post_meta($post_id, '_referer', true);
+                if ($referer) {
+                    $path = wp_parse_url($referer, PHP_URL_PATH);
+                    echo '<a href="' . esc_url($referer) . '" target="_blank" title="' . esc_attr($referer) . '">' . esc_html($path ?: '/') . '</a>';
+                } else {
+                    echo '<span style="color:#999;">Direct</span>';
+                }
+                break;
+        }
+    }
+    
+    /**
+     * Make columns sortable
+     */
+    public function search_log_sortable_columns($columns) {
+        $columns['count'] = 'count';
+        $columns['results'] = 'results';
+        return $columns;
+    }
+    
+    /**
+     * Handle sorting by meta fields
+     */
+    public function search_log_orderby($query) {
+        if (!is_admin() || !$query->is_main_query()) {
+            return;
+        }
+        
+        // Check if we're on search log screen
+        $screen = get_current_screen();
+        if (!$screen || $screen->post_type !== 'cik_search_log') {
+            return;
+        }
+        
+        $orderby = $query->get('orderby');
+        
+        if ('count' === $orderby) {
+            $query->set('meta_key', '_search_count');
+            $query->set('orderby', 'meta_value_num');
+        } elseif ('results' === $orderby) {
+            $query->set('meta_key', '_results_count');
+            $query->set('orderby', 'meta_value_num');
+        }
+    }
+    
+    /**
+     * Cleanup old search logs based on retention setting
+     */
+    public function cleanup_old_logs() {
+        $settings = $this->get_analytics_settings();
+        $retention_days = $settings['retention'];
+        
+        // If 0 or not set, keep forever
+        if (empty($retention_days)) {
+            return;
+        }
+        
+        $cutoff_date = date('Y-m-d', strtotime('-' . intval($retention_days) . ' days'));
+        
+        $old_logs = get_posts(array(
+            'post_type'      => 'cik_search_log',
+            'posts_per_page' => -1,
+            'date_query'     => array(
+                array(
+                    'before' => $cutoff_date,
+                ),
+            ),
+            'fields'         => 'ids',
+        ));
+        
+        foreach ($old_logs as $log_id) {
+            wp_delete_post($log_id, true); // Force delete (skip trash)
+        }
+        
+        if (!empty($old_logs)) {
+            error_log('Smart Search: Cleaned up ' . count($old_logs) . ' old search logs');
+        }
+    }
+}
+
+/**
+ * Initialize plugin
+ */
+function cik_search_init() {
+    return Cik_Smart_Search::get_instance();
+}
+
+// Initialize
+cik_search_init();

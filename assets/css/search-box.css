@@ -1,0 +1,128 @@
+/**
+ * Smart Search Box Styles
+ * 
+ * This provides minimal styling. 
+ * Most styling comes from Tailwind classes in the template.
+ * Override these variables in your theme to customize colors.
+ */
+
+:root {
+    /* Primary colors - customize in your theme */
+    --cik-search-primary: #0066b3;
+    --cik-search-primary-hover: #0B5187;
+    --cik-search-border: #c9d1e0;
+    --cik-search-tag-bg: rgba(162, 185, 224, 0.25);
+    --cik-search-tag-hover: rgba(162, 185, 224, 0.38);
+    --cik-search-text: #2d2d2f;
+    --cik-search-dark: #141516;
+}
+
+/* Minimal resets for non-Tailwind environments */
+.cik-search-wrapper * {
+    box-sizing: border-box;
+}
+
+/* Search form focus state */
+.cik-search-form input:focus {
+    outline: none;
+}
+
+/* Tag link defaults */
+.cik-search-tag {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Accessibility improvements */
+.cik-search-form input[type="search"] {
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.cik-search-form button[type="submit"] {
+    background: none;
+    border: none;
+    padding: 0;
+}
+
+/* Voice Search Icon */
+.cik-search-wrapper .voice-search-icon {
+    user-select: none;
+}
+
+/* Print styles */
+@media print {
+    .cik-search-wrapper {
+        display: none;
+    }
+}
+
+/* RTL Support */
+[dir="rtl"] .cik-search-form {
+    direction: rtl;
+}
+
+/* Mobile Responsive Styles */
+@media (max-width: 767px) {
+    /* Reduce input container padding on mobile */
+    .cik-search-form > div {
+        padding: 12px 16px !important;
+    }
+    
+    /* Reduce gap between icons */
+    .cik-search-form > div > div {
+        gap: 12px !important;
+    }
+    
+    /* Make voice icon slightly smaller on mobile */
+    .cik-search-form .cik-search-voice-search {
+        width: 32px !important;
+        height: 32px !important;
+    }
+    
+    /* Tags container - enable horizontal scroll */
+    .cik-search-tags {
+        width: 100%;
+        overflow: hidden;
+    }
+    
+    /* Tags horizontal scroll on mobile */
+    .cik-search-tags > div {
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE/Edge */
+        padding-bottom: 4px; /* Space for potential iOS bounce */
+    }
+    
+    /* Hide scrollbar but keep functionality */
+    .cik-search-tags > div::-webkit-scrollbar {
+        display: none; /* Chrome/Safari */
+    }
+    
+    /* Tags should not shrink or wrap */
+    .cik-search-tag {
+        flex-shrink: 0 !important;
+        white-space: nowrap !important;
+    }
+}
+
+/* 
+ * Override Examples (add to your theme's style.css):
+ * 
+ * :root {
+ *     --cik-search-primary: #your-color;
+ *     --cik-search-primary-hover: #your-hover-color;
+ * }
+ * 
+ * .cik-search-wrapper {
+ *     max-width: 1200px;
+ * }
+ */

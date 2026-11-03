@@ -1,0 +1,23 @@
+# Dependencies
+vendor/
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temp
+*.log
+*.tmp
+*.bak
+
+# Environment
+.env*
